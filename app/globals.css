@@ -1,26 +1,66 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
+/*
+ * Trading UI design tokens - see .claude/skills/trading-ui-design/SKILL.md.
+ * This is a single fixed dark theme by design (a trading terminal, not a
+ * themeable app), so there is deliberately no prefers-color-scheme / light
+ * variant here.
+ */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  /* Surfaces - near-black, layered by elevation */
+  --color-base: #0a0a0a; /* page background */
+  --color-panel: #141414; /* panel/card */
+  --color-elevated: #1a1a1a; /* inputs, hover */
+  --color-selected: #262626; /* active toggle, selected row */
+
+  /* Borders - barely visible, structure not decoration */
+  --color-default: #262626;
+  --color-strong: #333333; /* focus, active panel */
+
+  /* Text */
+  --color-fg: #ededed; /* primary */
+  --color-muted: #8a8a8a; /* labels, secondary */
+  --color-subtle: #5a5a5a; /* disclaimers, disabled */
+
+  /*
+   * Text color for content placed on a --color-fg surface (e.g. the
+   * inverted primary button). Same value as --color-base, but under its
+   * own name: `text-base` would collide with Tailwind's built-in font-size
+   * utility (--text-base: 1rem), silently making one of the two meanings
+   * unreachable. See the design skill's Anti-patterns / shadcn note.
+   */
+  --color-on-fg: #0a0a0a;
+
+  /* Semantic - meaning only, never decoration */
+  --color-gain: #22c55e;
+  /*
+   * Desaturated from Tailwind red-500 (#ef4444, 84% saturation) to 66%,
+   * matching green-500's ~71% - red-500's higher saturation was reading
+   * as psychologically "louder" than green-500 despite green actually
+   * being *more* luminant (WCAG relative luminance ~0.41 vs ~0.23).
+   * Lightness is unchanged from red-500, so contrast against --color-base
+   * is unaffected (~5.1:1, same as before). See the Tokens section note.
+   */
+  --color-loss: #dc5454;
+  --color-warn: #eab308; /* stale data, closed market */
+  --color-accent: #60a5fa; /* focus rings, links */
+
+  /*
+   * shadcn/ui compatibility aliases - see the design skill's "shadcn/ui
+   * normalization" section. Un-customized shadcn components reference
+   * these names; without them they'd render unstyled.
+   */
+  --color-background: var(--color-base);
+  --color-foreground: var(--color-fg);
+  --color-border: var(--color-default);
+  --color-input: var(--color-elevated);
+  --color-ring: var(--color-accent);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-base);
+  color: var(--color-fg);
 }
