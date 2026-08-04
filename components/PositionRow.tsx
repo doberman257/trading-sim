@@ -1,4 +1,5 @@
-import { formatCents, multiply } from "@/lib/trading/money";
+import { formatCents } from "@/lib/trading/money";
+import { valuePosition } from "@/lib/trading/pnl";
 
 export type PositionRowProps = {
   symbol: string;
@@ -16,10 +17,11 @@ export function PositionRow({
   currentPriceCents,
   isStale = false,
 }: PositionRowProps) {
-  const marketValueCents = multiply(currentPriceCents, quantity);
-  const deltaCents = currentPriceCents - avgCostCents;
-  const unrealizedPnlCents = multiply(deltaCents, quantity);
-  const percent = avgCostCents === 0n ? 0 : (Number(deltaCents) / Number(avgCostCents)) * 100;
+  const {
+    marketValueCents,
+    unrealizedPnlCents,
+    unrealizedPnlPercent: percent,
+  } = valuePosition(avgCostCents, currentPriceCents, quantity);
 
   const up = unrealizedPnlCents >= 0n;
   const flat = unrealizedPnlCents === 0n;
