@@ -1,1 +1,6 @@
+npm ci --dry-run || {
+  echo ""
+  echo "package-lock.json is out of sync with package.json - run 'npm install' and commit the updated lock file."
+  exit 1
+}
 npm run verify
