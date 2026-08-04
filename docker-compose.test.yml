@@ -1,0 +1,14 @@
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: trading_sim_test
+    ports:
+      # Non-default host port so this doesn't collide with a local Postgres.
+      - "5433:5432"
+    tmpfs:
+      # No volume: every run starts from a completely empty database.
+      - /var/lib/postgresql/data

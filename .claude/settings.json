@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npm run verify",
+            "timeout": 120,
+            "statusMessage": "Running npm run verify..."
+          }
+        ]
+      }
+    ]
+  }
+}
