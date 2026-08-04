@@ -16,7 +16,8 @@
     "db:push:test": "drizzle-kit push --config drizzle.test.config.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "verify": "npm run typecheck && npm run test && npm run format:check"
+    "verify": "npm run typecheck && npm run test && npm run format:check",
+    "prepare": "husky"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",
@@ -37,6 +38,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.0",
     "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
     "prettier": "^3.9.6",
     "prettier-plugin-tailwindcss": "^0.8.1",
     "tailwindcss": "^4",
