@@ -50,9 +50,15 @@ if (!connectionString) {
 // exactly that). `vitest.integration.setup.ts` sets this to allow the
 // second connection the test needs; nothing sets it in production, so
 // deployed code always gets the strict default.
+// Exported so tests can assert on it directly (see lib/db/orders.test.ts's
+// concurrency precondition) instead of re-reading DB_POOL_MAX themselves -
+// asserting on the env var only proves someone *intended* more connections,
+// not that this client actually got them.
+export const poolMax = process.env.DB_POOL_MAX ? Number(process.env.DB_POOL_MAX) : 1;
+
 const client = postgres(connectionString, {
   prepare: false,
-  max: process.env.DB_POOL_MAX ? Number(process.env.DB_POOL_MAX) : 1,
+  max: poolMax,
   idle_timeout: 20,
 });
 

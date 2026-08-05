@@ -6,7 +6,7 @@ import { fetchQuote } from "../market/alpaca";
 import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
-import { db } from "./client";
+import { db, poolMax } from "./client";
 import { placeMarketOrder } from "./orders";
 import { accounts, orders, positions, transactions } from "./schema";
 import { assertLedgerBalances } from "./test-helpers";
@@ -188,6 +188,24 @@ describe("placeMarketOrder", () => {
   });
 
   it("two concurrent buy orders that together exceed the balance: exactly one succeeds, balance never goes negative", async () => {
+    // This test is worthless below 2: with only one connection available,
+    // postgres.js queues the second placeMarketOrder's transaction
+    // client-side until the first releases its connection, so the two
+    // transactions can never actually be in-flight on separate connections
+    // at once - the exact scenario SELECT ... FOR UPDATE exists to guard
+    // against never gets created, and this test would pass even with that
+    // lock deleted (this happened for real - see STATE.md's gotcha on it).
+    // Failing loudly here beats a green test that silently stopped proving
+    // anything the moment lib/db/client.ts's pool size changed.
+    expect(
+      poolMax,
+      `This test needs at least 2 real concurrent DB connections to exercise the SELECT ... FOR UPDATE lock ` +
+        `(lib/db/client.ts's poolMax is currently ${poolMax}, from DB_POOL_MAX). With only one connection, the ` +
+        `two placeMarketOrder calls below can never run concurrently - postgres.js serializes them client-side ` +
+        `before either reaches Postgres - so this test would pass trivially even if the row lock were removed. ` +
+        `Set DB_POOL_MAX >= 2 in vitest.integration.setup.ts.`,
+    ).toBeGreaterThanOrEqual(2);
+
     // Repeated across several fresh accounts in one test: a single pass
     // passing proves nothing about reliability, since the race this test
     // exercises is timing-dependent. Every iteration must independently
