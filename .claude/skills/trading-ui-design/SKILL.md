@@ -122,6 +122,13 @@ Rules:
 - Symbols, names, text: **left-aligned**
 - Always show 2 decimals, even for whole values — `264.00`, not `264`
 - Percentages: one decimal, always signed — `+0.3%`, `−0.2%`
+- **Whole-dollar amounts are thousands-grouped** — `100,000.00`, not
+  `100000.00`. This is baked into `formatCents` itself, not a per-component
+  choice: `100000.00` is genuinely hard to scan at a glance, and grouping
+  needed to apply everywhere money renders or not at all, not just on the
+  screen where someone happened to notice it. `toCents` accepts grouped
+  input back (`"100,000.00"` and `"100000.00"` parse identically) so
+  `formatCents`'s own output stays round-trippable.
 
 **This app is USD only.** There is no currency symbol logic in
 `formatCents` and no per-value currency selection anywhere in the UI — every
@@ -130,19 +137,37 @@ becomes a real requirement, that's a deliberate, planned change (touching
 `lib/trading/money.ts`, storage, and every display convention below), not
 something to improvise in one component because a screen "needs" it.
 
-**Currency indicator: once per context, never per cell.**
+**Currency indicator: in the value, everywhere — not in the header.**
 
-- **Tabular data:** the currency goes in the column header — `AVG COST ($)`,
-  `PRICE ($)`, `UNREALIZED P&L ($)`. Cells show bare numbers. A `$` on every
-  row in a dense table is chrome, not data — it repeats information the
-  header already gave, and it fights the `tabular-nums` alignment by adding
-  a non-digit character whose position shifts if a leading sign is also
-  present (`$150.00` vs. `−$797.00`).
-- **Standalone values** — anything not under a column header: a cash
-  balance, an order ticket's "Estimated cost" line, a summary card total —
-  get an explicit `$` prefix, since there's no header to carry the
-  information instead: `${formatCents(x)}`.
-- Never both (a `$` in the header _and_ in the cell), and never neither.
+This reverses an earlier version of this rule (currency in the header,
+bare numbers in cells). That version caused real breakage: `AVG COST ($)`,
+`FILL PRICE ($)`, and `UNREALIZED P&L ($)` are long enough that `($)` was
+what pushed the header onto two lines in a dense column. Dropping it not
+only fixed the wrap, it also removed a header/cell inconsistency: every
+other place in this app that shows a money value (a cash balance, an order
+ticket's estimate) already puts `$` on the value itself, not on a label
+above it — table cells were the one exception, and that exception is what
+broke.
+
+- **Every money value gets an explicit `$`, full stop** — table cell or
+  standalone, no exceptions: `${formatCents(x)}`.
+- **Column headers never carry `($)` or any other currency mark.** `Avg
+cost`, `Price`, `Market value`, `Fill price` — the value already says
+  it's a dollar amount, so the header doesn't need to say it too.
+- The old alignment worry (`$150.00` vs. `−$797.00` shifting where the
+  digits start) is solved by ordering, not by hiding the `$`: sign first,
+  then `$`, then the digits — `+$150.00`, `−$797.00`. `Delta`
+  (`components/Delta.tsx`) already does this; follow the same order
+  anywhere else a signed money value needs a `$`.
+- **`Delta` (`components/Delta.tsx`) takes `showCurrency` as a required
+  prop, with no default.** It used to have no `$` logic at all, in any
+  branch — the bug only became visible on a `0.00` value (a brand-new
+  account has no gain/loss to show a sign on) because that's the one case
+  where "no `$` anywhere" and "no `$` because it's flat" look the same by
+  accident. Making the caller state `showCurrency` explicitly, every time,
+  is what catches this class of mistake before it ships again — a default
+  either way would just move the silent-omission risk to whichever context
+  didn't match the default.
 
 ---
 
@@ -151,28 +176,31 @@ something to improvise in one component because a screen "needs" it.
 Roughly 8% of men have some form of color vision deficiency, and red/green is
 the most common axis. Color is a redundant channel here, not the primary one.
 
-**Every gain/loss value carries a sign AND a direction glyph AND color:**
-
-```tsx
-function Delta({ cents, percent }: { cents: bigint; percent: number }) {
-  const up = cents >= 0n;
-  return (
-    <span
-      className={`font-mono tabular-nums ${up ? "text-gain" : "text-loss"}`}
-      aria-label={`${up ? "up" : "down"} ${formatCents(cents)}`}
-    >
-      <span aria-hidden>{up ? "▲" : "▼"}</span> {up ? "+" : "−"}
-      {formatCents(cents < 0n ? -cents : cents)} ({up ? "+" : "−"}
-      {Math.abs(percent).toFixed(1)}%)
-    </span>
-  );
-}
-```
+**Every gain/loss value carries a sign AND a direction glyph AND color.** The
+canonical implementation is `components/Delta.tsx` (`formatDeltaAmount` +
+`formatDeltaPercent`, plus the `Delta` component itself) — read that file
+rather than a duplicated snippet here, since a copy in this doc already
+drifted out of sync with the real component once (missing `$`-prefix logic,
+fixed by adding the required `showCurrency` prop — see Money and numbers
+above).
 
 Use the typographic minus `−` (U+2212), not a hyphen — it aligns with digits
 in monospace.
 
-At exactly zero: no glyph, `text-muted`, no sign.
+At exactly zero: no glyph, `text-muted`, no sign, percentage reads `0.0%`.
+
+**A nonzero percent can still round to "0.0" at one decimal place** — a
+$7.50 loss on a $15,396.50 position is −0.049%, which rounds to `0.0` and,
+signed, displays as `−0.0%`. Negative zero reads as a bug, not "a real but
+tiny loss," even though nothing here is an actual floating-point negative
+zero. `formatDeltaPercent` handles this: exact zero (no change at all)
+shows `0.0%`, unsigned; anything nonzero that would otherwise round to zero
+shows `<0.1%` instead, with **no sign** — the direction glyph and the exact
+cents amount right next to it already say which way it moved, so a sign on
+`<0.1%` would answer the same question twice, once precisely (the cents
+amount) and once vaguely and redundantly (`-<0.1%`). Once a percent is
+large enough to round to a nonzero first decimal, it goes back to the
+normal signed form (`+0.3%`, `−0.2%`).
 
 **Order status uses the same discipline.** Never a bare colored word:
 
@@ -214,20 +242,127 @@ The fundamental layout unit. Every region of the dashboard is a panel.
       <th className="text-muted px-3 py-2 text-left text-xs font-normal tracking-wide uppercase">
         Symbol
       </th>
+      {/* no "($)" - see Currency indicator above */}
       <th className="text-muted px-3 py-2 text-right text-xs font-normal tracking-wide uppercase">
-        Market value ($)
+        Market value
       </th>
     </tr>
   </thead>
   <tbody>
     <tr className="border-default/50 hover:bg-elevated border-b transition-colors">
       <td className="text-fg px-3 py-2.5 font-medium">AAPL</td>
-      {/* bare number - currency already stated in the header above */}
-      <td className="px-3 py-2.5 text-right font-mono tabular-nums">{formatCents(v)}</td>
+      <td className="px-3 py-2.5 text-right font-mono tabular-nums">${formatCents(v)}</td>
     </tr>
   </tbody>
 </table>
 ```
+
+**Compact, non-wrapping timestamps.** A bare `Intl.DateTimeFormat` result
+like `Aug 5, 3:32 PM` is too long for a dense table column and wraps onto
+multiple lines. Use relative time for anything recent, falling back to a
+short absolute date once relative time stops being useful:
+
+```tsx
+function formatOrderTimestamp(date: Date, now: Date): string {
+  const diffMinutes = Math.floor((now.getTime() - date.getTime()) / 60_000);
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: sameYear ? undefined : "numeric",
+  }).format(date); // "Aug 5" or "Dec 31, 2025"
+}
+```
+
+Take `now` as an explicit argument, the same as `getMarketStatus` in
+`lib/trading/market-hours.ts` — never default it to `new Date()` inside the
+function. The caller (a Server Component render) passes the real current
+time once; tests pass an exact fixture. Export the function so its exact
+text has unit test coverage — this project has no component-render setup
+(no jsdom/testing-library), so testable wording lives in a plain function,
+not inline JSX. See `MarketStatusBanner`'s `openMessage`/`closedMessage` and
+`Delta`'s `formatDeltaAmount` for the same pattern applied elsewhere.
+
+---
+
+## Panel grid proportions
+
+The dashboard's three panels don't split evenly, because their content
+doesn't need equal space:
+
+```tsx
+<div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_3fr_2fr]">
+  <OrderTicket /* fixed width */ />
+  <PositionsPanel /* 3fr */ />
+  <RecentOrdersPanel /* 2fr */ />
+</div>
+```
+
+- **The order ticket is fixed-width (`320px`), never `fr`.** It's a form
+  with a handful of inputs, not content that benefits from extra room -
+  giving it a flexible share would either starve the two data panels or
+  leave the form awkwardly wide for no reason.
+- **The two data panels split the remaining space by column-content
+  weight, not evenly.** Count real column width, not column count: Positions
+  and Recent orders both have 6 columns, but Positions' `Unrealized P&L`
+  column carries a sign, a glyph, a `$` amount, _and_ a percentage in
+  parens (`▲ +$1,234.56 (+12.3%)`) - meaningfully wider than anything in
+  Recent orders. `3fr`/`2fr` reflects that; a `1fr`/`1fr` split (or a fixed
+  px width for either) is what caused the original wrapping bug, because a
+  fixed width has no way to adapt to whatever the actual content needs.
+- When adding a new panel to this grid, estimate its widest realistic cell
+  (not header) across all its columns before picking a share - that's the
+  number that actually determines whether it wraps.
+
+---
+
+## Responsive tables
+
+**A `<table>` cannot be responsively restyled with CSS alone below its
+breakpoint** — Tailwind's mobile stacking pattern generally works by hiding
+and reshaping the same elements, but a `<tr>`/`<td>` rendered outside a
+`<table>`/`<tbody>` is invalid HTML and browsers silently drop it, so you
+cannot just add mobile-only flex classes to table cells and expect a card
+layout to appear. Two genuinely separate markup structures are required:
+a `<table>` shown at `lg:` and up, and a stacked card list shown below it.
+
+```tsx
+{
+  /* Table at lg+ */
+}
+<table className="hidden w-full text-sm lg:table">{/* ...thead, tbody as normal... */}</table>;
+
+{
+  /* Stacked label/value cards below lg */
+}
+<div className="flex flex-col gap-2 lg:hidden">
+  {rows.map((row) => (
+    <div key={row.id} className="border-default bg-elevated rounded-md border p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-fg font-medium">{row.symbol}</span>
+      </div>
+      <div className="flex items-center justify-between py-1">
+        <span className="text-muted text-xs">Qty</span>
+        <span className="text-fg font-mono text-sm tabular-nums">{row.quantity}</span>
+      </div>
+      {/* one label/value row per column that was in the table */}
+    </div>
+  ))}
+</div>;
+```
+
+If the table row is its own component (e.g. `PositionRow`, a `<tr>`), the
+card version is a **separate sibling component** with the same props (e.g.
+`PositionCard`, a `<div>`) - not a prop flag on the row component that
+switches its root element, since a component that sometimes returns a
+`<tr>` and sometimes a `<div>` can't be typed or used cleanly in either
+context. Every table this app renders (Positions, Recent orders) follows
+this pattern; a new one should too, rather than shipping desktop-only and
+letting mobile fall back to horizontal scroll.
 
 Density: `py-2.5` per row. Tight enough to scan many rows, loose enough to read.
 
@@ -247,6 +382,15 @@ that would fill it. Never a blank panel.
   <span className="text-fg font-mono text-sm tabular-nums">${formatCents(x)}</span>
 </div>
 ```
+
+**Money labels must match the side, not just the number.** "Cost" implies
+money leaving the account; a sell brings money in, so a buy/sell form
+showing "Estimated cost" on both sides is wrong on one of them, not just
+imprecise - money comes in on a sell, it doesn't cost anything. Use
+`"Estimated cost (ask)"` for a buy and `"Estimated proceeds (bid)"` for a
+sell. This generalizes: anywhere a label names a direction ("cost", "gain",
+"due"), check both sides of the toggle it's next to before assuming one
+wording covers both.
 
 **Input:**
 

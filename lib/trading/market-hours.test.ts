@@ -83,6 +83,18 @@ describe("getMarketStatus", () => {
     expect(status.reason).toBe("after_close");
     // Next open is Monday Jun 15 2026, 9:30 ET = 13:30 UTC.
     expect(status.nextOpen.toISOString()).toBe(utc(2026, 6, 15, 13, 30).toISOString());
+    // Skips the weekend, so Monday is not literally "tomorrow" from Friday.
+    expect(status.nextOpenIsTomorrow).toBe(false);
+  });
+
+  it("reports after_close on a Tuesday with nextOpenIsTomorrow true", () => {
+    // Tue Jun 9 2026, EDT: 17:00 ET = 21:00 UTC. Wednesday is a normal
+    // trading day, so the next open really is the very next calendar day.
+    const status = getMarketStatus(utc(2026, 6, 9, 21, 0));
+    expect(status.open).toBe(false);
+    expect(status.reason).toBe("after_close");
+    expect(status.nextOpen.toISOString()).toBe(utc(2026, 6, 10, 13, 30).toISOString());
+    expect(status.nextOpenIsTomorrow).toBe(true);
   });
 
   it("reports weekend with nextOpen on the following Monday", () => {
@@ -93,13 +105,42 @@ describe("getMarketStatus", () => {
     expect(status.nextOpen.toISOString()).toBe(utc(2026, 6, 15, 13, 30).toISOString());
   });
 
-  it("skips both the holiday and the following weekend for nextOpen", () => {
+  it("skips both the holiday and the following weekend for nextOpen, and names the holiday", () => {
     // Fri Jul 3 2026 (observed Independence Day) is immediately followed by
     // a weekend, so the next open must skip straight to Monday Jul 6 2026.
     const status = getMarketStatus(utc(2026, 7, 3, 14, 0));
     expect(status.open).toBe(false);
     expect(status.reason).toBe("holiday");
     expect(status.nextOpen.toISOString()).toBe(utc(2026, 7, 6, 13, 30).toISOString());
+    expect(status.holidayName).toBe("Independence Day (observed - Jul 4 is a Saturday)");
+  });
+
+  it("omits holidayName when the reason is not a holiday", () => {
+    const status = getMarketStatus(utc(2026, 6, 13, 14, 0)); // Saturday
+    expect(status.holidayName).toBeUndefined();
+  });
+
+  it("reports closesAt as 4:00pm ET and isEarlyCloseToday false on a regular trading day", () => {
+    // Wed Jun 10 2026, EDT: 10:00 ET = 14:00 UTC, close 16:00 ET = 20:00 UTC.
+    const status = getMarketStatus(utc(2026, 6, 10, 14, 0));
+    expect(status.open).toBe(true);
+    expect(status.closesAt?.toISOString()).toBe(utc(2026, 6, 10, 20, 0).toISOString());
+    expect(status.isEarlyCloseToday).toBe(false);
+  });
+
+  it("reports closesAt as 1:00pm ET and isEarlyCloseToday true on an early-close day", () => {
+    // Fri Nov 27 2026 (day after Thanksgiving), EST: 12:00 ET = 17:00 UTC,
+    // early close 13:00 ET = 18:00 UTC.
+    const status = getMarketStatus(utc(2026, 11, 27, 17, 0));
+    expect(status.open).toBe(true);
+    expect(status.closesAt?.toISOString()).toBe(utc(2026, 11, 27, 18, 0).toISOString());
+    expect(status.isEarlyCloseToday).toBe(true);
+  });
+
+  it("omits closesAt when the market is closed", () => {
+    const status = getMarketStatus(utc(2026, 6, 13, 14, 0)); // Saturday
+    expect(status.open).toBe(false);
+    expect(status.closesAt).toBeUndefined();
   });
 });
 

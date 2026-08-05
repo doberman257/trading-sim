@@ -1,11 +1,18 @@
+import { Delta } from "./Delta";
 import { formatCents } from "@/lib/trading/money";
-import { valuePosition } from "@/lib/trading/pnl";
 
 export type PositionRowProps = {
   symbol: string;
   quantity: number;
   avgCostCents: bigint;
-  currentPriceCents: bigint;
+  // All four below come pre-computed from calculatePortfolio (lib/trading/portfolio.ts)
+  // - this component never does money math, only display. They are null
+  // together when no quote was available for this symbol; that must render
+  // as visibly distinct from a real zero, never silently the same.
+  currentPriceCents: bigint | null;
+  marketValueCents: bigint | null;
+  unrealizedPnlCents: bigint | null;
+  unrealizedPnlPercent: number | null;
   /** True when the market is closed or the quote is older than the staleness threshold. */
   isStale?: boolean;
 };
@@ -15,16 +22,41 @@ export function PositionRow({
   quantity,
   avgCostCents,
   currentPriceCents,
+  marketValueCents,
+  unrealizedPnlCents,
+  unrealizedPnlPercent: percent,
   isStale = false,
 }: PositionRowProps) {
-  const {
-    marketValueCents,
-    unrealizedPnlCents,
-    unrealizedPnlPercent: percent,
-  } = valuePosition(avgCostCents, currentPriceCents, quantity);
-
-  const up = unrealizedPnlCents >= 0n;
-  const flat = unrealizedPnlCents === 0n;
+  if (
+    currentPriceCents === null ||
+    marketValueCents === null ||
+    unrealizedPnlCents === null ||
+    percent === null
+  ) {
+    return (
+      <tr className="border-default/50 hover:bg-elevated border-b transition-colors">
+        <td className="text-fg px-3 py-2.5 font-medium">
+          {symbol}
+          <span
+            className="text-subtle ml-2 inline-flex items-center gap-1 text-xs font-normal"
+            title="No quote is currently available for this symbol"
+          >
+            <span aria-hidden>?</span>
+            price unavailable
+          </span>
+        </td>
+        <td className="text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums">
+          {quantity}
+        </td>
+        <td className="text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums">
+          ${formatCents(avgCostCents)}
+        </td>
+        <td className="text-subtle px-3 py-2.5 text-right font-mono text-sm tabular-nums">—</td>
+        <td className="text-subtle px-3 py-2.5 text-right font-mono text-sm tabular-nums">—</td>
+        <td className="text-subtle px-3 py-2.5 text-right font-mono text-sm tabular-nums">—</td>
+      </tr>
+    );
+  }
 
   return (
     <tr className="border-default/50 hover:bg-elevated border-b transition-colors">
@@ -42,41 +74,24 @@ export function PositionRow({
       </td>
       <td className="text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums">{quantity}</td>
       <td className="text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums">
-        {formatCents(avgCostCents)}
+        ${formatCents(avgCostCents)}
       </td>
       <td
         className={`text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums ${
           isStale ? "opacity-60" : ""
         }`}
       >
-        {formatCents(currentPriceCents)}
+        ${formatCents(currentPriceCents)}
       </td>
       <td
         className={`text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums ${
           isStale ? "opacity-60" : ""
         }`}
       >
-        {formatCents(marketValueCents)}
+        ${formatCents(marketValueCents)}
       </td>
       <td className={`px-3 py-2.5 text-right ${isStale ? "opacity-60" : ""}`}>
-        <span
-          className={`font-mono text-sm tabular-nums ${
-            flat ? "text-muted" : up ? "text-gain" : "text-loss"
-          }`}
-          aria-label={`unrealized P&L ${up ? "up" : "down"} ${formatCents(
-            unrealizedPnlCents < 0n ? -unrealizedPnlCents : unrealizedPnlCents,
-          )}, ${Math.abs(percent).toFixed(1)} percent`}
-        >
-          {!flat && <span aria-hidden>{up ? "▲" : "▼"}</span>} {!flat && (up ? "+" : "−")}
-          {formatCents(unrealizedPnlCents < 0n ? -unrealizedPnlCents : unrealizedPnlCents)}
-          {!flat && (
-            <>
-              {" "}
-              ({up ? "+" : "−"}
-              {Math.abs(percent).toFixed(1)}%)
-            </>
-          )}
-        </span>
+        <Delta cents={unrealizedPnlCents} percent={percent} showCurrency />
       </td>
     </tr>
   );

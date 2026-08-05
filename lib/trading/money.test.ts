@@ -49,6 +49,17 @@ describe("toCents", () => {
   it("handles large values without precision loss", () => {
     expect(toCents("12345678901234.56")).toBe(1234567890123456n);
   });
+
+  it("accepts thousands-grouped input and parses it the same as ungrouped", () => {
+    expect(toCents("1,234.56")).toBe(toCents("1234.56"));
+    expect(toCents("100,000.00")).toBe(toCents("100000.00"));
+    expect(toCents("-1,234.56")).toBe(-toCents("1234.56"));
+  });
+
+  it("rejects a grouped amount with the wrong number of digits in a group", () => {
+    expect(() => toCents("12,34.56")).toThrow();
+    expect(() => toCents("1,2345.56")).toThrow();
+  });
 });
 
 describe("formatCents", () => {
@@ -74,6 +85,16 @@ describe("formatCents", () => {
 
   it("formats zero", () => {
     expect(formatCents(0n)).toBe("0.00");
+  });
+
+  it("groups the whole-dollar part with thousands separators", () => {
+    expect(formatCents(toCents("100000.00"))).toBe("100,000.00");
+    expect(formatCents(toCents("1000000.00"))).toBe("1,000,000.00");
+    expect(formatCents(toCents("-1234567.89"))).toBe("-1,234,567.89");
+  });
+
+  it("does not group a whole-dollar part under 1,000", () => {
+    expect(formatCents(toCents("999.99"))).toBe("999.99");
   });
 
   it("round-trips through toCents", () => {
