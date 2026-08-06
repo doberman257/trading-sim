@@ -11,5 +11,11 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 15_000,
   },
-  resolve: { alias: { "@": path.resolve(__dirname, "./") } },
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./"),
+      // See vitest.server-only-shim.ts for why this alias exists.
+      "server-only": path.resolve(__dirname, "./vitest.server-only-shim.ts"),
+    },
+  },
 });

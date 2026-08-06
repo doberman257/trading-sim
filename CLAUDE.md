@@ -2,9 +2,7 @@ Trading Simulator
 
 A paper-trading platform. Real market prices from Alpaca, virtual money only. No real orders are ever placed.
 
-Stack
-
-Next.js (App Router) · TypeScript strict · Supabase (Postgres + Auth) Drizzle ORM · Zod · Tailwind + shadcn/ui · Vitest · Prettier
+Read STATE.md at the start of any session doing feature work — it has current status, what's done, the next task, and known gotchas. Update it at the end of any session that completes a milestone.
 
 Hard rules
 No any. If a type is unknown, use unknown and validate with Zod.
@@ -23,13 +21,8 @@ Realized P&L is only computed on sell.
 Verification — required after every change
 npm run verify
 
-This runs typecheck, test, and format:check. Do not consider a task complete until it passes. If a test fails, fix the code — do not weaken the test.
+Do not consider a task complete until it passes. If a test fails, fix the code — do not weaken the test.
 
-Structure
-lib/trading/ Pure business logic + tests (money, types, execute)
-lib/db/ Drizzle schema and queries
-lib/market/ Alpaca client, Zod schemas for external data
-app/ Pages and Server Actions
 Conventions
 Comments and identifiers in English.
 Test descriptions state the behavior being verified, not the function name. Good: "buy fills at ask, not bid". Bad: "executeMarketOrder works".

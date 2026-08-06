@@ -59,6 +59,11 @@ Only evaluate items relevant to what's actually in the diff. Read enough surroun
    - A test that asserts against internal implementation details (mock call counts/arguments that aren't behavior, private state) rather than observable behavior.
    - A new time-dependent test that uses the real current date (`new Date()` with no argument, `Date.now()`) instead of an explicit fixed `Date`. The one documented exception is the holiday-data freshness guard in `lib/trading/market-hours.test.ts`, which deliberately checks against the real current date - do not flag that one.
 
+8. **Config changes that could invalidate an existing test without failing it.** This is not hypothetical: `lib/db/client.ts`'s connection pool was capped to `max: 1` for a genuine serverless-correctness reason, and it silently broke the row-lock concurrency test's validity - the test kept passing, but only because the pool cap now made it impossible for the two transactions it runs to ever be concurrent, so it would have kept passing even with `SELECT ... FOR UPDATE` removed. Nothing about that was visible from a green test run; it only surfaced by deliberately re-running the lock-removal check the test's own comment described.
+   - When the diff touches connection pooling (`max`, pool size), concurrency limits, timeouts (`idle_timeout`, request timeouts), caching (`cache:`, `revalidate`, `unstable_cache`), or environment-conditional behavior (`process.env.NODE_ENV`, a new env var gating behavior) - identify every existing test that depends on the behavior being changed, not just the test file nearest the diff.
+   - For each one, ask: does this test's premise (genuine concurrency, a real network round trip, a cold vs. warm state, an unmocked timing window) still hold under the new config, or could the new config make the test pass by construction regardless of whether the code under test is correct?
+   - If a test's validity is now in question, don't just flag it - verify it the same way this one was caught: temporarily break the behavior the test claims to protect (remove the lock, force the old timeout, etc.), confirm the test now fails, then restore it. A test that stays green either way is the finding, not a false alarm.
+
 ## Output format
 
 Group findings into exactly these three sections, in this order. Omit a section entirely if it has no findings.

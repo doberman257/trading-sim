@@ -88,6 +88,22 @@ export type MarketStatus = {
   open: boolean;
   reason?: MarketClosedReason;
   nextOpen: Date;
+  // Only set when open: true. Today's actual close time, accounting for
+  // early-close days - exposed here so callers displaying "closes at X"
+  // never need to re-derive whether today is an early close themselves.
+  closesAt?: Date;
+  // Only set when open: true. Lets a caller say "(early close)" without
+  // re-deriving it from closesAt's wall-clock hour.
+  isEarlyCloseToday?: boolean;
+  // Only set when reason === "holiday". The specific holiday's name, so a
+  // caller can say "closed for Independence Day" instead of just "holiday".
+  holidayName?: string;
+  // Only set when open: false. True when nextOpen falls on the very next
+  // calendar date (ET), so a caller can say "opens tomorrow" instead of
+  // "opens Wednesday" when today already is the day before that open -
+  // saying the weekday name in that case reads as if it were a different,
+  // later Wednesday.
+  nextOpenIsTomorrow?: boolean;
 };
 
 const REGULAR_OPEN_MINUTES = 9 * 60 + 30; // 9:30am ET
@@ -175,8 +191,12 @@ function easternWallClockToUtc(
   return new Date(guess.getTime() - 60 * 60 * 1000);
 }
 
+function findHoliday(key: string): MarketHoliday | undefined {
+  return NYSE_HOLIDAYS.find((holiday) => holiday.date === key);
+}
+
 function isHoliday(key: string): boolean {
-  return NYSE_HOLIDAYS.some((holiday) => holiday.date === key);
+  return findHoliday(key) !== undefined;
 }
 
 function findEarlyClose(key: string): EarlyCloseDay | undefined {
@@ -219,7 +239,19 @@ export function getMarketStatus(now: Date): MarketStatus {
   const open = isTradingDay && !beforeOpen && minutesNow < closeMinutes;
 
   if (open) {
-    return { open: true, nextOpen: nextTradingDayOpen(parts) };
+    const closesAt = easternWallClockToUtc(
+      parts.year,
+      parts.month,
+      parts.day,
+      Math.floor(closeMinutes / 60),
+      closeMinutes % 60,
+    );
+    return {
+      open: true,
+      nextOpen: nextTradingDayOpen(parts),
+      closesAt,
+      isEarlyCloseToday: earlyClose !== undefined,
+    };
   }
 
   let reason: MarketClosedReason;
@@ -237,7 +269,18 @@ export function getMarketStatus(now: Date): MarketStatus {
     ? easternWallClockToUtc(parts.year, parts.month, parts.day, 9, 30)
     : nextTradingDayOpen(parts);
 
-  return { open: false, reason, nextOpen };
+  const tomorrow = getEasternParts(
+    new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1, 12)),
+  );
+  const nextOpenIsTomorrow = dateKey(getEasternParts(nextOpen)) === dateKey(tomorrow);
+
+  return {
+    open: false,
+    reason,
+    nextOpen,
+    nextOpenIsTomorrow,
+    holidayName: reason === "holiday" ? findHoliday(key)?.name : undefined,
+  };
 }
 
 export function isMarketOpen(now: Date): boolean {

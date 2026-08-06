@@ -14,3 +14,8 @@ if (!process.env.TEST_DATABASE_URL) {
 }
 
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+
+// See the DB_POOL_MAX comment in lib/db/client.ts: the row-lock concurrency
+// test needs two genuinely simultaneous connections from this one process,
+// which production's max: 1 default would make structurally impossible.
+process.env.DB_POOL_MAX = "5";
