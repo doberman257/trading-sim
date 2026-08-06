@@ -1,0 +1,7 @@
+# Normalizes line endings for anyone who clones fresh. On a Windows machine
+# with core.autocrlf=true (the Git for Windows default), tracked text files
+# get CRLF on checkout - which is why .prettierrc sets endOfLine: "auto"
+# rather than relying on this alone. Discovered while verifying Node 24
+# compatibility; unrelated to Node version itself (reproduced identically
+# on Node 24 and Node 25). See STATE.md's gotcha on this.
+* text=auto eol=lf
