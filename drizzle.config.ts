@@ -16,4 +16,9 @@ export default defineConfig({
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: { url: databaseUrl },
+  // Without this, drizzle-kit introspects every schema in the database,
+  // including Supabase's own (auth, storage, extensions, ...) - one of
+  // those has a check constraint drizzle-kit's introspection can't parse
+  // and crashes on. This app only ever manages the public schema anyway.
+  schemaFilter: ["public"],
 });

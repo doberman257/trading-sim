@@ -11,7 +11,9 @@ Business logic lives in lib/trading/ as pure functions. No database access, no n
 Every database write happens inside a transaction.
 Every external API response is validated with Zod at the boundary, before it reaches any typed code.
 No client-side database access. RLS is enabled with no policies. All reads and writes go through server code.
-Never cache market data. Use cache: "no-store" on quote fetches.
+Live quotes are never cached — use cache: "no-store". Showing a stale price as current is the exact failure this rule exists to prevent.
+Completed historical bars (a closed trading day) may be cached aggressively — that bar is immutable fact and will never change.
+Today's still-forming bar is live, not historical. Treat it like a quote: never cached, even though it comes from the same bars endpoint as history.
 Trading domain rules
 Buy orders fill at the ask price. Sell orders fill at the bid price. Never use a single "current price" — the spread must be modeled.
 Reject quotes older than 60 seconds (stale_quote).

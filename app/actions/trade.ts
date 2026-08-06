@@ -31,12 +31,13 @@ export async function placeTrade(input: TradeInput): Promise<OrderResult> {
   const result = await placeMarketOrder({ userId: user.id, symbol, side, quantity });
 
   if (result.ok) {
-    // The dashboard has no server-side cache of its own to invalidate (see
-    // the caching note on app/dashboard/page.tsx) - this clears the
+    // Neither page has a server-side cache of its own to invalidate (see
+    // the caching note on app/(app)/dashboard/page.tsx) - this clears the
     // client-side Router Cache so a rejected order never needs this, but a
-    // filled one is immediately reflected the next time the user navigates
-    // back to the dashboard, once an order ticket calls this action there.
+    // filled one is immediately reflected the next time the user views
+    // either page, whichever order ticket placed it.
     revalidatePath("/dashboard");
+    revalidatePath(`/stock/${symbol}`);
   }
 
   return result;

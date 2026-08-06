@@ -19,6 +19,11 @@ export type OrderTicketProps = {
   cashCentsString: string;
   heldPositions: readonly { symbol: string; quantity: number }[];
   marketStatus: MarketStatus;
+  // Set on the stock detail page, where the symbol is already the page's
+  // context - the input becomes a static label instead of a free-text field.
+  // Left unset on the dashboard, where the ticket is the one place a symbol
+  // gets typed in the first place.
+  fixedSymbol?: string;
 };
 
 type SubmitOutcome =
@@ -31,11 +36,16 @@ const QUOTE_DEBOUNCE_MS = 400;
 const inputClassName =
   "border-default bg-elevated text-fg placeholder:text-subtle focus:border-strong focus:ring-accent w-full rounded-md border px-3 py-2 font-mono text-sm tabular-nums focus:ring-1 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50";
 
-export function OrderTicket({ cashCentsString, heldPositions, marketStatus }: OrderTicketProps) {
+export function OrderTicket({
+  cashCentsString,
+  heldPositions,
+  marketStatus,
+  fixedSymbol,
+}: OrderTicketProps) {
   const cashCents = BigInt(cashCentsString);
 
   const [side, setSide] = useState<Side>("buy");
-  const [symbolInput, setSymbolInput] = useState("");
+  const [symbolInput, setSymbolInput] = useState(fixedSymbol ?? "");
   const [quantityInput, setQuantityInput] = useState("");
   const [quote, setQuote] = useState<{ bidCents: Cents; askCents: Cents } | null>(null);
   const [quoteStatus, setQuoteStatus] = useState<"idle" | "loading" | "unavailable">("idle");
@@ -121,7 +131,14 @@ export function OrderTicket({ cashCentsString, heldPositions, marketStatus }: Or
             symbol,
             side,
           });
-          setSymbolInput("");
+          // Only cleared when the symbol itself was free-text input - on the
+          // stock detail page, fixedSymbol means this ticket only ever
+          // trades one symbol, and clearing it here would leave symbolInput
+          // empty on the next render, making the ticket look broken
+          // ("Enter a symbol.") until the page is refreshed.
+          if (!fixedSymbol) {
+            setSymbolInput("");
+          }
           setQuantityInput("");
           // No router.refresh() here - placeTrade's own revalidatePath("/dashboard")
           // is the single mechanism keeping the dashboard's data fresh
@@ -167,17 +184,26 @@ export function OrderTicket({ cashCentsString, heldPositions, marketStatus }: Or
           </button>
         </div>
 
-        <label className="flex flex-col gap-1">
-          <span className="text-muted text-xs">Symbol</span>
-          <input
-            value={symbolInput}
-            onChange={(event) => setSymbolInput(event.target.value.toUpperCase())}
-            placeholder="AAPL"
-            maxLength={5}
-            autoComplete="off"
-            className={inputClassName}
-          />
-        </label>
+        {fixedSymbol ? (
+          <div className="flex items-center justify-between py-1">
+            <span className="text-muted text-xs">Symbol</span>
+            <span className="text-fg font-mono text-sm font-medium tabular-nums">
+              {fixedSymbol}
+            </span>
+          </div>
+        ) : (
+          <label className="flex flex-col gap-1">
+            <span className="text-muted text-xs">Symbol</span>
+            <input
+              value={symbolInput}
+              onChange={(event) => setSymbolInput(event.target.value.toUpperCase())}
+              placeholder="AAPL"
+              maxLength={5}
+              autoComplete="off"
+              className={inputClassName}
+            />
+          </label>
+        )}
 
         <label className="flex flex-col gap-1">
           <span className="text-muted text-xs">Quantity</span>

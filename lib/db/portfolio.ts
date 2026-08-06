@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { Side } from "../trading/types";
 import { db } from "./client";
 import { accounts, orderStatusEnum, orders, positions } from "./schema";
@@ -116,4 +116,22 @@ export async function getPortfolio(accountId: string): Promise<Portfolio> {
       (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
     ),
   };
+}
+
+export type HeldPosition = {
+  quantity: number;
+  avgCostCents: bigint;
+};
+
+// A single-symbol lookup, not a filter over getPortfolio's full result - the
+// stock detail page only ever needs one position, and getPortfolio's join
+// against every position and the 20 most recent orders would be wasted work
+// for that.
+export async function getPosition(accountId: string, symbol: string): Promise<HeldPosition | null> {
+  const [row] = await db
+    .select({ quantity: positions.quantity, avgCostCents: positions.avgCostCents })
+    .from(positions)
+    .where(and(eq(positions.accountId, accountId), eq(positions.symbol, symbol)));
+
+  return row ?? null;
 }
