@@ -1,5 +1,4 @@
 import { redirect } from "next/navigation";
-import { logout } from "@/app/(auth)/actions";
 import { MarketStatusBanner } from "@/components/MarketStatusBanner";
 import { OrderTicket } from "@/components/OrderTicket";
 import { PositionsPanel } from "@/components/PositionsPanel";
@@ -55,14 +54,6 @@ export default async function DashboardPage() {
           needs it - see the trading-ui-design skill's Panel grid
           proportions note for the column-width math behind this number. */}
       <div className="mx-auto flex max-w-[1600px] flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <span className="text-muted text-xs">Signed in as {user.email}</span>
-          <form action={logout}>
-            <button type="submit" className="text-muted hover:text-fg text-xs">
-              Sign out
-            </button>
-          </form>
-        </div>
         <MarketStatusBanner status={marketStatus} />
         <SummaryPanel
           cashCents={portfolio.cashCents}
