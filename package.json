@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": "25.6.1"
+    "node": "24.x"
   },
   "scripts": {
     "dev": "next dev",
@@ -15,11 +15,12 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "quote": "tsx scripts/fetch-quote.ts",
     "check-db": "tsx scripts/check-db.ts",
+    "check-node-engine": "tsx scripts/check-node-engine.ts",
     "db:push": "drizzle-kit push",
     "db:push:test": "drizzle-kit push --config drizzle.test.config.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "verify": "npm run typecheck && npm run test && npm run format:check",
+    "verify": "npm run check-node-engine && npm run typecheck && npm run test && npm run format:check",
     "prepare": "husky"
   },
   "dependencies": {
