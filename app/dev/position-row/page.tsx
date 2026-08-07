@@ -16,6 +16,10 @@ const profit = fixture(toCents("150.00"), toCents("178.32"), 50);
 const loss = fixture(toCents("250.00"), toCents("210.15"), 20);
 const stale = fixture(toCents("300.00"), toCents("305.50"), 15);
 
+const upSparkline = [15000n, 15500n, 16200n, 17832n];
+const downSparkline = [25000n, 23800n, 22000n, 21015n];
+const flatSparkline = [30500n, 30800n, 30200n, 30550n];
+
 // Design preview only - meaningless once deployed. Not gated with an
 // authenticated allowlist or a secret because there's a simpler test that
 // already covers it: NODE_ENV is "development" locally and "production"
@@ -67,15 +71,18 @@ export default function PositionRowPreviewPage() {
                   <th className="text-muted px-3 py-2 text-right text-xs font-normal tracking-wide uppercase">
                     Unrealized P&amp;L
                   </th>
+                  <th className="text-muted px-3 py-2 text-left text-xs font-normal tracking-wide uppercase">
+                    30d trend
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {/* Profit */}
-                <PositionRow symbol="AAPL" {...profit} />
+                <PositionRow symbol="AAPL" {...profit} sparklineCloses={upSparkline} />
                 {/* Loss */}
-                <PositionRow symbol="TSLA" {...loss} />
+                <PositionRow symbol="TSLA" {...loss} sparklineCloses={downSparkline} />
                 {/* Stale - market closed, last-close price dimmed */}
-                <PositionRow symbol="MSFT" {...stale} isStale />
+                <PositionRow symbol="MSFT" {...stale} isStale sparklineCloses={flatSparkline} />
                 {/* Price unavailable - distinct from stale: no number at all, not even a dimmed one */}
                 <PositionRow
                   symbol="GOOG"
@@ -85,6 +92,7 @@ export default function PositionRowPreviewPage() {
                   marketValueCents={null}
                   unrealizedPnlCents={null}
                   unrealizedPnlPercent={null}
+                  sparklineCloses={[]}
                 />
               </tbody>
             </table>

@@ -6,7 +6,7 @@ import { RecentOrdersPanel } from "@/components/RecentOrdersPanel";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getPortfolio } from "@/lib/db/portfolio";
-import { fetchQuotes } from "@/lib/market/alpaca";
+import { fetchDailyBarsForSymbols, fetchQuotes } from "@/lib/market/alpaca";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getMarketStatus } from "@/lib/trading/market-hours";
 import { calculatePortfolio } from "@/lib/trading/portfolio";
@@ -36,7 +36,18 @@ export default async function DashboardPage() {
   // fetchQuotes never throws for market-data failures (see lib/market/alpaca.ts):
   // an Alpaca outage and a single bad symbol both come back as failedSymbols,
   // so calculatePortfolio below treats them identically to "no quote available".
-  const { quotes } = await fetchQuotes(symbols);
+  // fetchDailyBarsForSymbols batches every held symbol's sparkline data into
+  // one request rather than one per position - see lib/market/alpaca.ts.
+  const [{ quotes }, sparklineBars] = await Promise.all([
+    fetchQuotes(symbols),
+    fetchDailyBarsForSymbols(symbols),
+  ]);
+  const sparklines = new Map(
+    [...sparklineBars.entries()].map(([symbol, bars]) => [
+      symbol,
+      bars.map((bar) => bar.closeCents),
+    ]),
+  );
 
   const marketStatus = getMarketStatus(new Date());
   const valuation = calculatePortfolio(portfolio.positions, portfolio.cashCents, quotes);
@@ -72,7 +83,11 @@ export default async function DashboardPage() {
             heldPositions={portfolio.positions}
             marketStatus={marketStatus}
           />
-          <PositionsPanel positions={valuation.positions} isStale={isStale} />
+          <PositionsPanel
+            positions={valuation.positions}
+            isStale={isStale}
+            sparklines={sparklines}
+          />
           <RecentOrdersPanel orders={portfolio.recentOrders} />
         </div>
       </div>

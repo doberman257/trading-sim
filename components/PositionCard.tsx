@@ -1,4 +1,5 @@
 import { Delta } from "./Delta";
+import { Sparkline } from "./Sparkline";
 import { formatCents } from "@/lib/trading/money";
 import type { PositionRowProps } from "./PositionRow";
 
@@ -15,6 +16,7 @@ export function PositionCard({
   unrealizedPnlCents,
   unrealizedPnlPercent: percent,
   isStale = false,
+  sparklineCloses,
 }: PositionRowProps) {
   const priceUnavailable =
     currentPriceCents === null ||
@@ -59,6 +61,10 @@ export function PositionCard({
         ) : (
           <span className="text-subtle font-mono text-sm tabular-nums">—</span>
         )}
+      </div>
+      <div className="flex items-center justify-between py-1">
+        <span className="text-muted text-xs">30d trend</span>
+        <Sparkline closesCents={sparklineCloses} />
       </div>
     </div>
   );

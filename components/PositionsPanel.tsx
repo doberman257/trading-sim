@@ -6,9 +6,11 @@ export type PositionsPanelProps = {
   positions: PositionValuation[];
   /** True when prices shown are from the last close rather than live - see MarketStatusBanner. */
   isStale: boolean;
+  /** Daily closes per symbol, oldest first, for the trend sparkline - missing entries render as unavailable. */
+  sparklines: ReadonlyMap<string, readonly bigint[]>;
 };
 
-export function PositionsPanel({ positions, isStale }: PositionsPanelProps) {
+export function PositionsPanel({ positions, isStale, sparklines }: PositionsPanelProps) {
   return (
     <section className="border-default bg-panel rounded-lg border">
       <header className="border-default flex items-center justify-between border-b px-4 py-2.5">
@@ -62,6 +64,12 @@ export function PositionsPanel({ positions, isStale }: PositionsPanelProps) {
                   >
                     Unrealized P&amp;L
                   </th>
+                  <th
+                    scope="col"
+                    className="text-muted px-3 py-2 text-left text-xs font-normal tracking-wide uppercase"
+                  >
+                    30d trend
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -76,6 +84,7 @@ export function PositionsPanel({ positions, isStale }: PositionsPanelProps) {
                     unrealizedPnlCents={position.unrealizedPnlCents}
                     unrealizedPnlPercent={position.unrealizedPnlPercent}
                     isStale={isStale}
+                    sparklineCloses={sparklines.get(position.symbol) ?? []}
                   />
                 ))}
               </tbody>
@@ -93,6 +102,7 @@ export function PositionsPanel({ positions, isStale }: PositionsPanelProps) {
                   unrealizedPnlCents={position.unrealizedPnlCents}
                   unrealizedPnlPercent={position.unrealizedPnlPercent}
                   isStale={isStale}
+                  sparklineCloses={sparklines.get(position.symbol) ?? []}
                 />
               ))}
             </div>

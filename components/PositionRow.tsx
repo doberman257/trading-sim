@@ -1,4 +1,5 @@
 import { Delta } from "./Delta";
+import { Sparkline } from "./Sparkline";
 import { formatCents } from "@/lib/trading/money";
 
 export type PositionRowProps = {
@@ -15,6 +16,8 @@ export type PositionRowProps = {
   unrealizedPnlPercent: number | null;
   /** True when the market is closed or the quote is older than the staleness threshold. */
   isStale?: boolean;
+  /** Daily closes, oldest first, for the trend sparkline. Empty when unavailable. */
+  sparklineCloses: readonly bigint[];
 };
 
 export function PositionRow({
@@ -26,6 +29,7 @@ export function PositionRow({
   unrealizedPnlCents,
   unrealizedPnlPercent: percent,
   isStale = false,
+  sparklineCloses,
 }: PositionRowProps) {
   if (
     currentPriceCents === null ||
@@ -54,6 +58,9 @@ export function PositionRow({
         <td className="text-subtle px-3 py-2.5 text-right font-mono text-sm tabular-nums">—</td>
         <td className="text-subtle px-3 py-2.5 text-right font-mono text-sm tabular-nums">—</td>
         <td className="text-subtle px-3 py-2.5 text-right font-mono text-sm tabular-nums">—</td>
+        <td className="px-3 py-2.5">
+          <Sparkline closesCents={sparklineCloses} />
+        </td>
       </tr>
     );
   }
@@ -92,6 +99,9 @@ export function PositionRow({
       </td>
       <td className={`px-3 py-2.5 text-right ${isStale ? "opacity-60" : ""}`}>
         <Delta cents={unrealizedPnlCents} percent={percent} showCurrency />
+      </td>
+      <td className="px-3 py-2.5">
+        <Sparkline closesCents={sparklineCloses} />
       </td>
     </tr>
   );

@@ -211,6 +211,20 @@ export type DailyBar = {
   volume: number;
 };
 
+// Shared by fetchDailyBars and fetchDailyBarsForSymbols - same conversion
+// (float through a fixed 2-decimal string, never touching bigint arithmetic
+// directly) either way, so it lives in one place rather than two.
+function toDailyBar(bar: z.infer<typeof AlpacaBarSchema>): DailyBar {
+  return {
+    date: bar.t.slice(0, 10),
+    openCents: toCents(bar.o.toFixed(2)),
+    highCents: toCents(bar.h.toFixed(2)),
+    lowCents: toCents(bar.l.toFixed(2)),
+    closeCents: toCents(bar.c.toFixed(2)),
+    volume: bar.v,
+  };
+}
+
 const DAILY_BARS_LOOKBACK_DAYS = 90;
 
 // Daily bars, most recent `DAILY_BARS_LOOKBACK_DAYS` calendar days - enough
@@ -263,18 +277,88 @@ export async function fetchDailyBars(symbol: string): Promise<DailyBar[]> {
     const body: unknown = await response.json();
     const parsed = AlpacaBarsResponseSchema.parse(body);
 
-    return (parsed.bars ?? []).map((bar) => ({
-      date: bar.t.slice(0, 10),
-      // Alpaca returns floats; convert through a fixed 2-decimal string so
-      // the float never touches bigint arithmetic directly - same
-      // conversion fetchQuote uses.
-      openCents: toCents(bar.o.toFixed(2)),
-      highCents: toCents(bar.h.toFixed(2)),
-      lowCents: toCents(bar.l.toFixed(2)),
-      closeCents: toCents(bar.c.toFixed(2)),
-      volume: bar.v,
-    }));
+    return (parsed.bars ?? []).map(toDailyBar);
   } catch {
     return [];
+  }
+}
+
+// A symbol with no data in range is omitted from `bars` entirely (not
+// present as null or an empty array) - confirmed empirically by mixing a
+// nonexistent symbol into a real batch request.
+const AlpacaMultiBarsResponseSchema = z.object({
+  bars: z.record(z.string(), z.array(AlpacaBarSchema)),
+});
+
+const SPARKLINE_LOOKBACK_DAYS = 30;
+
+// One request for many symbols' daily bars, using Alpaca's multi-symbol
+// bars endpoint - the same batching this file already does for quotes
+// (fetchQuotes), applied here so a watchlist or positions list with N
+// symbols costs one network call, not N. Built for sparklines specifically
+// (see components/Sparkline.tsx): a short, fixed lookback, not the full
+// chart's 90 days.
+//
+// Soft-fails to an empty map on any error, same as fetchQuotes and for the
+// same reason - a sparkline is decorative context, not something a page
+// should break over. `feed=iex` is required for the same reason as
+// fetchDailyBars (the default feed 403s on recent-day ranges).
+export async function fetchDailyBarsForSymbols(
+  symbols: string[],
+  lookbackDays: number = SPARKLINE_LOOKBACK_DAYS,
+): Promise<Map<string, DailyBar[]>> {
+  const uniqueSymbols = [...new Set(symbols)];
+
+  if (uniqueSymbols.length === 0) {
+    return new Map();
+  }
+
+  const keyId = process.env.ALPACA_KEY_ID;
+  const secretKey = process.env.ALPACA_SECRET_KEY;
+
+  if (!keyId || !secretKey) {
+    throw new Error("Missing ALPACA_KEY_ID or ALPACA_SECRET_KEY environment variables");
+  }
+
+  const end = new Date();
+  const start = new Date(end.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  const symbolsParam = uniqueSymbols.map(encodeURIComponent).join(",");
+
+  const url =
+    `${ALPACA_QUOTE_URL}/bars?symbols=${symbolsParam}&timeframe=1Day` +
+    // A generous fixed cap, not `lookbackDays * uniqueSymbols.length`: this
+    // endpoint's `limit` caps the TOTAL bars across every symbol in the
+    // response, not per symbol - confirmed empirically (a `limit` smaller
+    // than that total silently returned only the first symbol's bars and
+    // dropped the rest, with no error). 10,000 comfortably covers a 30-day
+    // window across a watchlist far larger than this app's UI supports.
+    `&start=${start.toISOString()}&end=${end.toISOString()}&limit=10000&feed=iex`;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "APCA-API-KEY-ID": keyId,
+        "APCA-API-SECRET-KEY": secretKey,
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return new Map();
+    }
+
+    const body: unknown = await response.json();
+    const parsed = AlpacaMultiBarsResponseSchema.parse(body);
+
+    const result = new Map<string, DailyBar[]>();
+    for (const symbol of uniqueSymbols) {
+      const bars = parsed.bars[symbol];
+      if (bars) {
+        result.set(symbol, bars.map(toDailyBar));
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
   }
 }

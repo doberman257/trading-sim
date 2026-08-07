@@ -6,7 +6,7 @@ import { WatchlistPanel } from "@/components/WatchlistPanel";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getLastSuccessfulAssetSync } from "@/lib/db/assets";
 import { getWatchlist } from "@/lib/db/watchlist";
-import { fetchQuotes } from "@/lib/market/alpaca";
+import { fetchDailyBarsForSymbols, fetchQuotes } from "@/lib/market/alpaca";
 import { POPULAR_SYMBOLS } from "@/lib/market/popular-symbols";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -31,18 +31,25 @@ export default async function DiscoverPage() {
   const watchlistSymbols = watchlist.map((entry) => entry.symbol);
   const popularSymbols = POPULAR_SYMBOLS.map((entry) => entry.symbol);
 
-  const [{ quotes }, lastSuccessfulSync] = await Promise.all([
+  // Sparklines are watchlist-only (not Popular, which is fixed curated
+  // content, not something a user is tracking) and batched into one request
+  // for the whole list rather than one per symbol - see
+  // fetchDailyBarsForSymbols in lib/market/alpaca.ts.
+  const [{ quotes }, lastSuccessfulSync, sparklineBars] = await Promise.all([
     fetchQuotes([...watchlistSymbols, ...popularSymbols]),
     getLastSuccessfulAssetSync(),
+    fetchDailyBarsForSymbols(watchlistSymbols),
   ]);
 
   const watchlistItems = watchlist.map((entry) => {
     const quote = quotes.get(entry.symbol);
+    const bars = sparklineBars.get(entry.symbol) ?? [];
     return {
       symbol: entry.symbol,
       name: entry.name,
       bidCents: quote?.bidCents ?? null,
       askCents: quote?.askCents ?? null,
+      sparklineCloses: bars.map((bar) => bar.closeCents),
     };
   });
 
