@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { MarketStatusBanner } from "@/components/MarketStatusBanner";
 import { OrderTicket } from "@/components/OrderTicket";
+import { PortfolioAllocation } from "@/components/PortfolioAllocation";
 import { PositionsPanel } from "@/components/PositionsPanel";
 import { RecentOrdersPanel } from "@/components/RecentOrdersPanel";
 import { SummaryPanel } from "@/components/SummaryPanel";
@@ -8,6 +9,7 @@ import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getPortfolio } from "@/lib/db/portfolio";
 import { fetchDailyBarsForSymbols, fetchQuotes } from "@/lib/market/alpaca";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { calculateAllocation } from "@/lib/trading/allocation";
 import { getMarketStatus } from "@/lib/trading/market-hours";
 import { calculatePortfolio } from "@/lib/trading/portfolio";
 
@@ -51,6 +53,11 @@ export default async function DashboardPage() {
 
   const marketStatus = getMarketStatus(new Date());
   const valuation = calculatePortfolio(portfolio.positions, portfolio.cashCents, quotes);
+  const allocation = calculateAllocation(
+    valuation.positions,
+    portfolio.cashCents,
+    valuation.totalEquityCents,
+  );
 
   // Prices are only ever live immediately after a fresh fetch while the
   // market is open. There is no quote cache in this app for an individual
@@ -72,6 +79,7 @@ export default async function DashboardPage() {
           totalUnrealizedPnlCents={valuation.totalUnrealizedPnlCents}
           missingQuoteSymbols={valuation.missingQuoteSymbols}
         />
+        <PortfolioAllocation slices={allocation} />
         {/* 320px fixed for the order ticket (a form, not content that grows);
             the two data panels split the rest 3:2 - Positions has 6 columns
             including a wide signed P&L-with-percent column, Recent orders
