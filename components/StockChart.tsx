@@ -6,6 +6,7 @@ import {
   createSeriesMarkers,
   CrosshairMode,
   HistogramSeries,
+  LineSeries,
   LineStyle,
   type IChartApi,
   type SeriesMarker,
@@ -13,6 +14,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 import { getBarsForSymbol } from "@/app/actions/bars";
+import type { BarTimeframe } from "@/lib/market/alpaca";
 import {
   CHART_RANGES,
   isValidTimeframeForRange,
@@ -20,7 +22,7 @@ import {
   TIMEFRAME_ORDER,
   type ChartRange,
 } from "@/lib/market/chart-timeframes";
-import type { BarTimeframe } from "@/lib/market/alpaca";
+import { DEFAULT_RSI_PERIOD, ema, rsi, sma } from "@/lib/trading/indicators";
 import {
   barChartTime,
   centsToDollars,
@@ -85,6 +87,62 @@ const segmentedButtonClassName = (active: boolean, disabled: boolean) => {
   return "text-muted hover:text-fg rounded px-2 py-1 text-xs transition-colors";
 };
 
+const DEFAULT_SMA_PERIOD = 20;
+const DEFAULT_EMA_PERIOD = 20;
+const MIN_PERIOD = 2;
+const MAX_PERIOD = 500;
+
+function clampPeriod(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SMA_PERIOD;
+  return Math.min(MAX_PERIOD, Math.max(MIN_PERIOD, Math.round(value)));
+}
+
+type IndicatorToggleProps = {
+  label: string;
+  enabled: boolean;
+  period: number;
+  activeColorClassName: string;
+  onToggle: () => void;
+  onPeriodChange: (period: number) => void;
+};
+
+// One toggle + period pair, shared markup for SMA/EMA/RSI - a restrained
+// toggle list, not a trading terminal's full indicator dialog (no style
+// pickers, no per-indicator color choice, no add/remove list).
+function IndicatorToggle({
+  label,
+  enabled,
+  period,
+  activeColorClassName,
+  onToggle,
+  onPeriodChange,
+}: IndicatorToggleProps) {
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={
+          enabled
+            ? `bg-selected rounded px-2 py-1 text-xs font-medium ${activeColorClassName}`
+            : "text-muted hover:text-fg rounded px-2 py-1 text-xs transition-colors"
+        }
+      >
+        {label}
+      </button>
+      <input
+        type="number"
+        value={period}
+        disabled={!enabled}
+        onChange={(event) => onPeriodChange(clampPeriod(Number(event.target.value)))}
+        min={MIN_PERIOD}
+        max={MAX_PERIOD}
+        className="border-default bg-elevated text-fg w-12 rounded border px-1 py-1 text-xs tabular-nums disabled:opacity-40"
+      />
+    </div>
+  );
+}
+
 export function StockChart({
   symbol,
   initialBars,
@@ -98,6 +156,13 @@ export function StockChart({
   const [bars, setBars] = useState<StockChartBar[]>(initialBars);
   const [isLoading, setIsLoading] = useState(false);
   const hasMountedRef = useRef(false);
+
+  const [smaEnabled, setSmaEnabled] = useState(false);
+  const [smaPeriod, setSmaPeriod] = useState(DEFAULT_SMA_PERIOD);
+  const [emaEnabled, setEmaEnabled] = useState(false);
+  const [emaPeriod, setEmaPeriod] = useState(DEFAULT_EMA_PERIOD);
+  const [rsiEnabled, setRsiEnabled] = useState(false);
+  const [rsiPeriod, setRsiPeriod] = useState(DEFAULT_RSI_PERIOD);
 
   // Skips the fetch on the very first render - initialBars already matches
   // initialTimeframe/initialRange, fetched server-side with the page's own
@@ -141,6 +206,9 @@ export function StockChart({
   const lowReadoutRef = useRef<HTMLSpanElement>(null);
   const closeReadoutRef = useRef<HTMLSpanElement>(null);
   const volumeReadoutRef = useRef<HTMLSpanElement>(null);
+  const smaReadoutRef = useRef<HTMLSpanElement>(null);
+  const emaReadoutRef = useRef<HTMLSpanElement>(null);
+  const rsiReadoutRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -154,8 +222,20 @@ export function StockChart({
     const gain = readThemeColor("--color-gain");
     const loss = readThemeColor("--color-loss");
     const muted = readThemeColor("--color-muted");
+    const subtle = readThemeColor("--color-subtle");
+    const fg = readThemeColor("--color-fg");
     const gridLine = readThemeColor("--color-default");
     const accent = readThemeColor("--color-accent");
+    const smaColor = readThemeColor("--color-chart-line-1");
+    const emaColor = readThemeColor("--color-chart-line-2");
+
+    // The pane is vertically split by named price scales confined via
+    // scaleMargins (the same overlay technique volume already uses, not
+    // lightweight-charts' newer separate-pane API - see the volume series
+    // below). RSI needs its own 0-100 scale, so enabling it re-partitions
+    // the split three ways instead of two.
+    const priceScaleMargins = rsiEnabled ? { top: 0.05, bottom: 0.4 } : { top: 0.1, bottom: 0.3 };
+    const volumeScaleMargins = rsiEnabled ? { top: 0.6, bottom: 0.25 } : { top: 0.75, bottom: 0 };
 
     const chart = createChart(container, {
       width: container.clientWidth,
@@ -168,9 +248,7 @@ export function StockChart({
       timeScale: { borderColor: gridLine },
       rightPriceScale: {
         borderColor: gridLine,
-        // Leave the bottom ~28% of the pane clear for the volume overlay
-        // below, so candles and volume bars never visually collide.
-        scaleMargins: { top: 0.1, bottom: 0.3 },
+        scaleMargins: priceScaleMargins,
       },
       crosshair: { mode: CrosshairMode.Normal },
     });
@@ -204,7 +282,7 @@ export function StockChart({
       priceScaleId: "volume",
     });
     chart.priceScale("volume").applyOptions({
-      scaleMargins: { top: 0.75, bottom: 0 },
+      scaleMargins: volumeScaleMargins,
       visible: false,
     });
 
@@ -230,6 +308,92 @@ export function StockChart({
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
         title: "Avg cost",
+      });
+    }
+
+    // Indicators are computed from the same closing prices already loaded
+    // for the candles - no separate fetch, per lib/trading/indicators.ts
+    // being pure functions with no fetching of their own.
+    const closesCents = bars.map((bar) => BigInt(bar.closeCents));
+    const smaValues = smaEnabled ? sma(closesCents, smaPeriod) : null;
+    const emaValues = emaEnabled ? ema(closesCents, emaPeriod) : null;
+    const rsiValues = rsiEnabled ? rsi(closesCents, rsiPeriod) : null;
+
+    if (smaValues) {
+      const smaSeries = chart.addSeries(LineSeries, {
+        color: smaColor,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      // Points with no value yet (the first `period - 1` bars) are omitted
+      // entirely rather than plotted as 0 - the line simply starts once
+      // there's enough data, same "null means unknown" convention the
+      // indicator functions themselves use.
+      smaSeries.setData(
+        bars
+          .map((bar, i) => ({ time: barChartTime(bar.timestamp, timeframe), value: smaValues[i] }))
+          .filter((point): point is { time: Time; value: number } => point.value !== null)
+          .map((point) => ({ time: point.time, value: point.value / 100 })),
+      );
+    }
+
+    if (emaValues) {
+      const emaSeries = chart.addSeries(LineSeries, {
+        color: emaColor,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      emaSeries.setData(
+        bars
+          .map((bar, i) => ({ time: barChartTime(bar.timestamp, timeframe), value: emaValues[i] }))
+          .filter((point): point is { time: Time; value: number } => point.value !== null)
+          .map((point) => ({ time: point.time, value: point.value / 100 })),
+      );
+    }
+
+    if (rsiValues) {
+      const rsiSeries = chart.addSeries(LineSeries, {
+        color: fg,
+        lineWidth: 1,
+        priceScaleId: "rsi",
+        priceLineVisible: false,
+        lastValueVisible: false,
+        // RSI's own scale is fixed 0-100, not auto-fit to the visible
+        // data's range - a flat run near 50 shouldn't zoom in and look
+        // like it's swinging wildly between two nearly-identical values.
+        // This is a series option, not a price-scale option, despite
+        // configuring the scale's own behavior.
+        autoscaleInfoProvider: () => ({
+          priceRange: { minValue: 0, maxValue: 100 },
+        }),
+      });
+      chart.priceScale("rsi").applyOptions({
+        scaleMargins: { top: 0.78, bottom: 0 },
+        visible: false,
+      });
+      rsiSeries.setData(
+        bars
+          .map((bar, i) => ({ time: barChartTime(bar.timestamp, timeframe), value: rsiValues[i] }))
+          .filter((point): point is { time: Time; value: number } => point.value !== null),
+      );
+      // Conventional overbought/oversold reference lines, not interactive -
+      // kept to two thin dashed lines, not shaded zones, per "keep the UI
+      // restrained."
+      rsiSeries.createPriceLine({
+        price: 70,
+        color: subtle,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+      });
+      rsiSeries.createPriceLine({
+        price: 30,
+        color: subtle,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
       });
     }
 
@@ -263,11 +427,11 @@ export function StockChart({
     // barChartTime only ever returns a string or a UTCTimestamp number in
     // practice (never a BusinessDay object) - the cast reflects that, since
     // Time's type alone doesn't let TS narrow it automatically.
-    const byTime = new Map<string | number, StockChartBar>(
-      bars.map((bar) => [barChartTime(bar.timestamp, timeframe) as string | number, bar]),
+    const byTime = new Map<string | number, number>(
+      bars.map((bar, i) => [barChartTime(bar.timestamp, timeframe) as string | number, i]),
     );
 
-    function renderReadout(bar: StockChartBar) {
+    function renderReadout(bar: StockChartBar, index: number) {
       const label =
         timeframe === "1Day" || timeframe === "1Week"
           ? bar.timestamp.slice(0, 10)
@@ -285,15 +449,32 @@ export function StockChart({
         closeReadoutRef.current.textContent = formatDollars(bar.closeCents);
       if (volumeReadoutRef.current)
         volumeReadoutRef.current.textContent = bar.volume.toLocaleString("en-US");
+      if (smaReadoutRef.current) {
+        const value = smaValues?.[index];
+        smaReadoutRef.current.textContent = value != null ? (value / 100).toFixed(2) : "—";
+      }
+      if (emaReadoutRef.current) {
+        const value = emaValues?.[index];
+        emaReadoutRef.current.textContent = value != null ? (value / 100).toFixed(2) : "—";
+      }
+      if (rsiReadoutRef.current) {
+        const value = rsiValues?.[index];
+        rsiReadoutRef.current.textContent = value != null ? value.toFixed(1) : "—";
+      }
     }
 
-    const lastBar = bars.at(-1);
-    if (lastBar) renderReadout(lastBar);
+    const lastIndex = bars.length - 1;
+    const lastBar = bars[lastIndex];
+    if (lastBar) renderReadout(lastBar, lastIndex);
 
     chart.subscribeCrosshairMove((param) => {
       const key = param.time !== undefined ? normalizeChartTime(param.time) : undefined;
-      const hovered = key !== undefined ? byTime.get(key) : undefined;
-      renderReadout(hovered ?? lastBar!);
+      const index = key !== undefined ? byTime.get(key) : undefined;
+      if (index !== undefined) {
+        renderReadout(bars[index]!, index);
+      } else if (lastBar) {
+        renderReadout(lastBar, lastIndex);
+      }
     });
 
     chart.timeScale().fitContent();
@@ -308,7 +489,18 @@ export function StockChart({
       chart.remove();
       chartRef.current = null;
     };
-  }, [bars, timeframe, avgCostCents, trades]);
+  }, [
+    bars,
+    timeframe,
+    avgCostCents,
+    trades,
+    smaEnabled,
+    smaPeriod,
+    emaEnabled,
+    emaPeriod,
+    rsiEnabled,
+    rsiPeriod,
+  ]);
 
   return (
     <div className="border-default bg-panel rounded-lg border">
@@ -354,6 +546,34 @@ export function StockChart({
         </div>
       </div>
 
+      <div className="border-default flex flex-wrap items-center gap-3 border-b px-3 py-2">
+        <span className="text-subtle text-xs">Indicators</span>
+        <IndicatorToggle
+          label="SMA"
+          enabled={smaEnabled}
+          period={smaPeriod}
+          activeColorClassName="text-chart-line-1"
+          onToggle={() => setSmaEnabled((v) => !v)}
+          onPeriodChange={setSmaPeriod}
+        />
+        <IndicatorToggle
+          label="EMA"
+          enabled={emaEnabled}
+          period={emaPeriod}
+          activeColorClassName="text-chart-line-2"
+          onToggle={() => setEmaEnabled((v) => !v)}
+          onPeriodChange={setEmaPeriod}
+        />
+        <IndicatorToggle
+          label="RSI"
+          enabled={rsiEnabled}
+          period={rsiPeriod}
+          activeColorClassName="text-fg"
+          onToggle={() => setRsiEnabled((v) => !v)}
+          onPeriodChange={setRsiPeriod}
+        />
+      </div>
+
       {bars.length === 0 && !isLoading ? (
         <div
           className="text-muted flex items-center justify-center text-sm"
@@ -383,6 +603,21 @@ export function StockChart({
             <span className="text-muted">
               Vol <span ref={volumeReadoutRef} className="text-fg font-mono tabular-nums" />
             </span>
+            {smaEnabled && (
+              <span className="text-chart-line-1">
+                SMA <span ref={smaReadoutRef} className="font-mono tabular-nums" />
+              </span>
+            )}
+            {emaEnabled && (
+              <span className="text-chart-line-2">
+                EMA <span ref={emaReadoutRef} className="font-mono tabular-nums" />
+              </span>
+            )}
+            {rsiEnabled && (
+              <span className="text-muted">
+                RSI <span ref={rsiReadoutRef} className="text-fg font-mono tabular-nums" />
+              </span>
+            )}
           </div>
           <div ref={containerRef} />
         </div>

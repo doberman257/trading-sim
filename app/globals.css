@@ -49,6 +49,20 @@
   --color-accent: #60a5fa; /* focus rings, links */
 
   /*
+   * Chart overlay lines only (SMA/EMA on the stock detail chart) - not a
+   * general-purpose categorical palette. Deliberately different from
+   * PortfolioAllocation's decision to reuse --color-accent's opacity scale
+   * instead of adding new tokens: that chart's slice count is unbounded (one
+   * per position), which a fixed set of hues can't cover cleanly, but a
+   * price chart only ever overlays a small, fixed number of named lines -
+   * a real, bounded need a couple of dedicated tokens fits better than
+   * stretching --color-accent (already claimed by the avg-cost line and the
+   * watchlist star) across a third, unrelated meaning.
+   */
+  --color-chart-line-1: #a78bfa; /* SMA overlay */
+  --color-chart-line-2: #f472b6; /* EMA overlay */
+
+  /*
    * shadcn/ui compatibility aliases - see the design skill's "shadcn/ui
    * normalization" section. Un-customized shadcn components reference
    * these names; without them they'd render unstyled.
