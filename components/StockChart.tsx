@@ -8,6 +8,7 @@ import {
   HistogramSeries,
   LineSeries,
   LineStyle,
+  PriceScaleMode,
   type IChartApi,
   type SeriesMarker,
   type Time,
@@ -163,6 +164,7 @@ export function StockChart({
   const [emaPeriod, setEmaPeriod] = useState(DEFAULT_EMA_PERIOD);
   const [rsiEnabled, setRsiEnabled] = useState(false);
   const [rsiPeriod, setRsiPeriod] = useState(DEFAULT_RSI_PERIOD);
+  const [logScale, setLogScale] = useState(false);
 
   // Skips the fetch on the very first render - initialBars already matches
   // initialTimeframe/initialRange, fetched server-side with the page's own
@@ -249,6 +251,12 @@ export function StockChart({
       rightPriceScale: {
         borderColor: gridLine,
         scaleMargins: priceScaleMargins,
+        // Log scale applies only to the main price scale, never to volume
+        // or RSI - both are already bounded/normalized (volume by its own
+        // "volume" price format, RSI by its fixed 0-100 range), so a log
+        // transform has no meaningful effect on either and would only
+        // distort the small values near zero that both can legitimately hit.
+        mode: logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
       },
       crosshair: { mode: CrosshairMode.Normal },
     });
@@ -500,6 +508,7 @@ export function StockChart({
     emaPeriod,
     rsiEnabled,
     rsiPeriod,
+    logScale,
   ]);
 
   return (
@@ -544,6 +553,14 @@ export function StockChart({
             ))}
           </div>
         </div>
+        <button
+          type="button"
+          onClick={() => setLogScale((v) => !v)}
+          title="Log scale shows percentage moves correctly over a long range; linear exaggerates recent absolute moves"
+          className={segmentedButtonClassName(logScale, false)}
+        >
+          Log
+        </button>
       </div>
 
       <div className="border-default flex flex-wrap items-center gap-3 border-b px-3 py-2">
