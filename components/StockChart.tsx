@@ -11,17 +11,28 @@ import {
   type SeriesMarker,
   type Time,
 } from "lightweight-charts";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getBarsForSymbol } from "@/app/actions/bars";
 import {
+  CHART_RANGES,
+  isValidTimeframeForRange,
+  nearestValidTimeframe,
+  TIMEFRAME_ORDER,
+  type ChartRange,
+} from "@/lib/market/chart-timeframes";
+import type { BarTimeframe } from "@/lib/market/alpaca";
+import {
+  barChartTime,
   centsToDollars,
+  findBarIndexAtOrBefore,
   formatDollars,
   isUpBar,
-  timeToDateKey,
+  normalizeChartTime,
   withAlpha,
 } from "./stockChartFormat";
 
 export type StockChartBar = {
-  date: string;
+  timestamp: string;
   // Crosses the Server -> Client Component boundary as strings, not
   // bigints - same reasoning as OrderTicket's cashCentsString. Reconstructed
   // to bigint, then converted to a plain dollar float only here, at the
@@ -35,19 +46,21 @@ export type StockChartBar = {
 };
 
 export type StockChartTrade = {
-  // Already the Eastern trading-day date ("YYYY-MM-DD") the fill belongs to
-  // - see toExchangeDateKey in lib/trading/market-hours.ts. This component
-  // never touches raw UTC timestamps, on purpose: that conversion is the
-  // one place an off-by-one-day bug would be easy to introduce and hard to
-  // notice, so it happens once, server-side, with its own tests.
-  date: string;
+  // The fill's own UTC instant, not a pre-computed date key - this
+  // component maps it onto whichever bar it belongs to itself (see
+  // findBarIndexAtOrBefore), which works the same way regardless of
+  // timeframe granularity, intraday or daily.
+  timestamp: string;
   side: "buy" | "sell";
   quantity: number;
   priceCents: string;
 };
 
 export type StockChartProps = {
-  bars: StockChartBar[];
+  symbol: string;
+  initialBars: StockChartBar[];
+  initialTimeframe: BarTimeframe;
+  initialRange: ChartRange;
   /** Null when no position is held - no line is drawn. */
   avgCostCents?: string | null;
   trades?: StockChartTrade[];
@@ -59,7 +72,67 @@ function readThemeColor(variable: string): string {
 
 const CHART_HEIGHT = 340;
 
-export function StockChart({ bars, avgCostCents, trades = [] }: StockChartProps) {
+const TIMEFRAME_LABELS: Record<BarTimeframe, string> = {
+  "15Min": "15m",
+  "1Hour": "1h",
+  "1Day": "1D",
+  "1Week": "1W",
+};
+
+const segmentedButtonClassName = (active: boolean, disabled: boolean) => {
+  if (disabled) return "text-subtle cursor-not-allowed px-2 py-1 text-xs";
+  if (active) return "bg-selected text-fg rounded px-2 py-1 text-xs font-medium";
+  return "text-muted hover:text-fg rounded px-2 py-1 text-xs transition-colors";
+};
+
+export function StockChart({
+  symbol,
+  initialBars,
+  initialTimeframe,
+  initialRange,
+  avgCostCents,
+  trades = [],
+}: StockChartProps) {
+  const [range, setRange] = useState<ChartRange>(initialRange);
+  const [timeframe, setTimeframe] = useState<BarTimeframe>(initialTimeframe);
+  const [bars, setBars] = useState<StockChartBar[]>(initialBars);
+  const [isLoading, setIsLoading] = useState(false);
+  const hasMountedRef = useRef(false);
+
+  // Skips the fetch on the very first render - initialBars already matches
+  // initialTimeframe/initialRange, fetched server-side with the page's own
+  // render. Only a subsequent user-driven change to either control should
+  // trigger a new request.
+  useEffect(() => {
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoading(true);
+
+    getBarsForSymbol(symbol, timeframe, range)
+      .then((fetchedBars) => {
+        if (!cancelled) setBars(fetchedBars);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, timeframe, range]);
+
+  function handleRangeChange(newRange: ChartRange) {
+    setRange(newRange);
+    // Never leaves the range/timeframe pair invalid - if the currently
+    // selected timeframe doesn't survive the new range, this deterministically
+    // picks a replacement rather than requiring a second click.
+    setTimeframe((current) => nearestValidTimeframe(newRange, current));
+  }
+
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const dateReadoutRef = useRef<HTMLSpanElement>(null);
@@ -113,7 +186,7 @@ export function StockChart({ bars, avgCostCents, trades = [] }: StockChartProps)
 
     candleSeries.setData(
       bars.map((bar) => ({
-        time: bar.date,
+        time: barChartTime(bar.timestamp, timeframe),
         open: centsToDollars(bar.openCents),
         high: centsToDollars(bar.highCents),
         low: centsToDollars(bar.lowCents),
@@ -140,7 +213,7 @@ export function StockChart({ bars, avgCostCents, trades = [] }: StockChartProps)
 
     volumeSeries.setData(
       bars.map((bar) => ({
-        time: bar.date,
+        time: barChartTime(bar.timestamp, timeframe),
         value: bar.volume,
         // Colored by the same bar's own direction (close vs. its own open),
         // matching the candle it sits under - not the more elaborate
@@ -161,32 +234,50 @@ export function StockChart({ bars, avgCostCents, trades = [] }: StockChartProps)
     }
 
     if (trades.length > 0) {
-      const barDates = new Set(bars.map((bar) => bar.date));
+      const barTimestamps = bars.map((bar) => bar.timestamp);
       const markers: SeriesMarker<Time>[] = trades
-        // A trade older than this chart's lookback window has no bar to
-        // anchor a marker to - lightweight-charts has no "off-chart"
-        // marker, so it's silently omitted rather than misplaced.
-        .filter((trade) => barDates.has(trade.date))
-        .map((trade) => ({
-          time: trade.date,
-          position: trade.side === "buy" ? "belowBar" : "aboveBar",
-          color: trade.side === "buy" ? gain : loss,
-          shape: trade.side === "buy" ? "arrowUp" : "arrowDown",
-          text: `${trade.side === "buy" ? "B" : "S"} ${trade.quantity}`,
-        }));
+        .map((trade) => {
+          const barIndex = findBarIndexAtOrBefore(barTimestamps, trade.timestamp);
+          // A trade older than this chart's loaded range has no bar to
+          // anchor a marker to - lightweight-charts has no "off-chart"
+          // marker, so it's omitted rather than misplaced.
+          if (barIndex < 0) return null;
+          return {
+            time: barChartTime(bars[barIndex]!.timestamp, timeframe),
+            position: trade.side === "buy" ? ("belowBar" as const) : ("aboveBar" as const),
+            color: trade.side === "buy" ? gain : loss,
+            shape: trade.side === "buy" ? ("arrowUp" as const) : ("arrowDown" as const),
+            text: `${trade.side === "buy" ? "B" : "S"} ${trade.quantity}`,
+          };
+        })
+        .filter((marker) => marker !== null);
       createSeriesMarkers(candleSeries, markers);
     }
 
-    // The crosshair readout reads from `bars`/`byDate` directly, not from
+    // The crosshair readout reads from `bars`/`byTime` directly, not from
     // the values lightweight-charts hands back in the crosshair-move
     // callback - both represent the same data, but going through the
     // library's own float round-trip a second time for display has no
     // benefit and only risks a subtly different rounding from what's
     // actually plotted.
-    const byDate = new Map(bars.map((bar) => [bar.date, bar]));
+    // barChartTime only ever returns a string or a UTCTimestamp number in
+    // practice (never a BusinessDay object) - the cast reflects that, since
+    // Time's type alone doesn't let TS narrow it automatically.
+    const byTime = new Map<string | number, StockChartBar>(
+      bars.map((bar) => [barChartTime(bar.timestamp, timeframe) as string | number, bar]),
+    );
 
     function renderReadout(bar: StockChartBar) {
-      if (dateReadoutRef.current) dateReadoutRef.current.textContent = bar.date;
+      const label =
+        timeframe === "1Day" || timeframe === "1Week"
+          ? bar.timestamp.slice(0, 10)
+          : new Date(bar.timestamp).toLocaleString("en-US", {
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+            });
+      if (dateReadoutRef.current) dateReadoutRef.current.textContent = label;
       if (openReadoutRef.current) openReadoutRef.current.textContent = formatDollars(bar.openCents);
       if (highReadoutRef.current) highReadoutRef.current.textContent = formatDollars(bar.highCents);
       if (lowReadoutRef.current) lowReadoutRef.current.textContent = formatDollars(bar.lowCents);
@@ -200,8 +291,8 @@ export function StockChart({ bars, avgCostCents, trades = [] }: StockChartProps)
     if (lastBar) renderReadout(lastBar);
 
     chart.subscribeCrosshairMove((param) => {
-      const dateKey = param.time !== undefined ? timeToDateKey(param.time) : undefined;
-      const hovered = dateKey !== undefined ? byDate.get(dateKey) : undefined;
+      const key = param.time !== undefined ? normalizeChartTime(param.time) : undefined;
+      const hovered = key !== undefined ? byTime.get(key) : undefined;
       renderReadout(hovered ?? lastBar!);
     });
 
@@ -217,43 +308,85 @@ export function StockChart({ bars, avgCostCents, trades = [] }: StockChartProps)
       chart.remove();
       chartRef.current = null;
     };
-  }, [bars, avgCostCents, trades]);
-
-  if (bars.length === 0) {
-    return (
-      <div
-        className="border-default bg-panel text-muted flex items-center justify-center rounded-lg border text-sm"
-        style={{ height: CHART_HEIGHT }}
-      >
-        No chart data available for this symbol yet.
-      </div>
-    );
-  }
+  }, [bars, timeframe, avgCostCents, trades]);
 
   return (
-    <div className="border-default bg-panel relative rounded-lg border">
-      <div
-        className="pointer-events-none absolute top-2 left-3 z-10 flex flex-wrap items-baseline gap-x-3 text-xs"
-        aria-hidden
-      >
-        <span ref={dateReadoutRef} className="text-fg font-medium" />
-        <span className="text-muted">
-          O <span ref={openReadoutRef} className="text-fg font-mono tabular-nums" />
-        </span>
-        <span className="text-muted">
-          H <span ref={highReadoutRef} className="text-fg font-mono tabular-nums" />
-        </span>
-        <span className="text-muted">
-          L <span ref={lowReadoutRef} className="text-fg font-mono tabular-nums" />
-        </span>
-        <span className="text-muted">
-          C <span ref={closeReadoutRef} className="text-fg font-mono tabular-nums" />
-        </span>
-        <span className="text-muted">
-          Vol <span ref={volumeReadoutRef} className="text-fg font-mono tabular-nums" />
-        </span>
+    <div className="border-default bg-panel rounded-lg border">
+      <div className="border-default flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="text-subtle text-xs">Interval</span>
+          <div className="flex gap-0.5">
+            {TIMEFRAME_ORDER.map((tf) => {
+              const disabled = !isValidTimeframeForRange(range, tf);
+              return (
+                <button
+                  key={tf}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setTimeframe(tf)}
+                  title={
+                    disabled
+                      ? `${TIMEFRAME_LABELS[tf]} bars aren't shown over a ${range} range - too many bars to be useful`
+                      : undefined
+                  }
+                  className={segmentedButtonClassName(tf === timeframe, disabled)}
+                >
+                  {TIMEFRAME_LABELS[tf]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-subtle text-xs">Range</span>
+          <div className="flex gap-0.5">
+            {CHART_RANGES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => handleRangeChange(r)}
+                className={segmentedButtonClassName(r === range, false)}
+              >
+                {r}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
-      <div ref={containerRef} />
+
+      {bars.length === 0 && !isLoading ? (
+        <div
+          className="text-muted flex items-center justify-center text-sm"
+          style={{ height: CHART_HEIGHT }}
+        >
+          No chart data available for this symbol yet.
+        </div>
+      ) : (
+        <div className={`relative ${isLoading ? "opacity-60" : ""}`}>
+          <div
+            className="pointer-events-none absolute top-2 left-3 z-10 flex flex-wrap items-baseline gap-x-3 text-xs"
+            aria-hidden
+          >
+            <span ref={dateReadoutRef} className="text-fg font-medium" />
+            <span className="text-muted">
+              O <span ref={openReadoutRef} className="text-fg font-mono tabular-nums" />
+            </span>
+            <span className="text-muted">
+              H <span ref={highReadoutRef} className="text-fg font-mono tabular-nums" />
+            </span>
+            <span className="text-muted">
+              L <span ref={lowReadoutRef} className="text-fg font-mono tabular-nums" />
+            </span>
+            <span className="text-muted">
+              C <span ref={closeReadoutRef} className="text-fg font-mono tabular-nums" />
+            </span>
+            <span className="text-muted">
+              Vol <span ref={volumeReadoutRef} className="text-fg font-mono tabular-nums" />
+            </span>
+          </div>
+          <div ref={containerRef} />
+        </div>
+      )}
     </div>
   );
 }

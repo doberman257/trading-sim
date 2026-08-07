@@ -10,14 +10,19 @@ import { getAssetBySymbol } from "@/lib/db/assets";
 import { getFilledOrdersForSymbol } from "@/lib/db/orders";
 import { getPosition } from "@/lib/db/portfolio";
 import { isSymbolWatched } from "@/lib/db/watchlist";
-import { fetchDailyBars, fetchQuotes } from "@/lib/market/alpaca";
+import { fetchBars, fetchQuotes } from "@/lib/market/alpaca";
+import { RANGE_LOOKBACK_MS, type ChartRange } from "@/lib/market/chart-timeframes";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getMarketStatus, toExchangeDateKey } from "@/lib/trading/market-hours";
+import { getMarketStatus } from "@/lib/trading/market-hours";
 import { SymbolSchema } from "@/lib/trading/symbol";
+import type { BarTimeframe } from "@/lib/market/alpaca";
 
 // Live quotes must never be served from a cached snapshot of this page -
 // see the caching rules in CLAUDE.md.
 export const dynamic = "force-dynamic";
+
+const DEFAULT_TIMEFRAME: BarTimeframe = "1Day";
+const DEFAULT_RANGE: ChartRange = "3M";
 
 type StockPageProps = {
   params: Promise<{ symbol: string }>;
@@ -44,12 +49,12 @@ export default async function StockPage({ params }: StockPageProps) {
 
   const account = await getOrCreateAccount(user.id);
 
-  const [assetInfo, { quotes }, position, watched, dailyBars, fills] = await Promise.all([
+  const [assetInfo, { quotes }, position, watched, initialBars, fills] = await Promise.all([
     getAssetBySymbol(symbol),
     fetchQuotes([symbol]),
     getPosition(account.id, symbol),
     isSymbolWatched(account.id, symbol),
-    fetchDailyBars(symbol),
+    fetchBars(symbol, DEFAULT_TIMEFRAME, RANGE_LOOKBACK_MS[DEFAULT_RANGE]),
     getFilledOrdersForSymbol(account.id, symbol),
   ]);
 
@@ -91,17 +96,20 @@ export default async function StockPage({ params }: StockPageProps) {
         />
 
         <StockChart
-          bars={dailyBars.map((bar) => ({
-            date: bar.date,
+          symbol={symbol}
+          initialBars={initialBars.map((bar) => ({
+            timestamp: bar.timestamp,
             openCents: bar.openCents.toString(),
             highCents: bar.highCents.toString(),
             lowCents: bar.lowCents.toString(),
             closeCents: bar.closeCents.toString(),
             volume: bar.volume,
           }))}
+          initialTimeframe={DEFAULT_TIMEFRAME}
+          initialRange={DEFAULT_RANGE}
           avgCostCents={position ? position.avgCostCents.toString() : null}
           trades={fills.map((fill) => ({
-            date: toExchangeDateKey(fill.filledAt),
+            timestamp: fill.filledAt.toISOString(),
             side: fill.side,
             quantity: fill.quantity,
             priceCents: fill.filledPriceCents.toString(),

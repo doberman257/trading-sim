@@ -3,6 +3,8 @@ import {
   getMarketStatus,
   HOLIDAY_DATA_VALID_THROUGH,
   isMarketOpen,
+  startOfExchangeDay,
+  startOfExchangeWeek,
   toExchangeDateKey,
 } from "./market-hours";
 
@@ -217,6 +219,54 @@ describe("toExchangeDateKey", () => {
     // both are midnight Eastern on their respective bar dates.
     expect(toExchangeDateKey(new Date("2026-07-28T04:00:00Z"))).toBe("2026-07-28");
     expect(toExchangeDateKey(new Date("2026-01-05T05:00:00Z"))).toBe("2026-01-05");
+  });
+});
+
+describe("startOfExchangeDay", () => {
+  it("returns midnight ET of the same Eastern day, in EDT", () => {
+    // Wed Jun 10 2026, 10:00 ET (EDT, UTC-4) - midnight ET that day is 04:00 UTC.
+    expect(startOfExchangeDay(utc(2026, 6, 10, 14, 0))).toEqual(utc(2026, 6, 10, 4, 0));
+  });
+
+  it("returns midnight ET of the same Eastern day, in EST", () => {
+    // Wed Jan 7 2026, 10:00 ET (EST, UTC-5) - midnight ET that day is 05:00 UTC.
+    expect(startOfExchangeDay(utc(2026, 1, 7, 15, 0))).toEqual(utc(2026, 1, 7, 5, 0));
+  });
+
+  it("uses the Eastern calendar day, not the UTC one, near the UTC date line", () => {
+    // 2:00 UTC Jun 11 is 22:00 ET Jun 10 (EDT) - still "today" is Jun 10 in
+    // Eastern terms even though the UTC date has already rolled over.
+    expect(startOfExchangeDay(utc(2026, 6, 11, 2, 0))).toEqual(utc(2026, 6, 10, 4, 0));
+  });
+});
+
+describe("startOfExchangeWeek", () => {
+  it("maps every weekday in an ordinary week to that week's Monday", () => {
+    // Mon Jun 8 - Sun Jun 14 2026, entirely within EDT (no DST transition).
+    const expectedMonday = utc(2026, 6, 8, 4, 0);
+    expect(startOfExchangeWeek(utc(2026, 6, 8, 14, 0))).toEqual(expectedMonday); // Mon
+    expect(startOfExchangeWeek(utc(2026, 6, 10, 14, 0))).toEqual(expectedMonday); // Wed
+    expect(startOfExchangeWeek(utc(2026, 6, 12, 14, 0))).toEqual(expectedMonday); // Fri
+    expect(startOfExchangeWeek(utc(2026, 6, 14, 14, 0))).toEqual(expectedMonday); // Sun
+  });
+
+  it("resolves correctly across the spring-forward DST transition week", () => {
+    // The transition week: Mon Mar 2 (EST) - Sun Mar 8 2026 (spring forward
+    // at 2am ET on Mar 8, so Mar 8 itself is EDT from 2am on, but its own
+    // midnight is still EST). Every day this week must resolve to Monday
+    // Mar 2's midnight EST (05:00 UTC), including the transition Sunday.
+    const expectedMonday = utc(2026, 3, 2, 5, 0);
+    expect(startOfExchangeWeek(utc(2026, 3, 2, 15, 0))).toEqual(expectedMonday); // Mon, EST
+    expect(startOfExchangeWeek(utc(2026, 3, 5, 15, 0))).toEqual(expectedMonday); // Thu, EST
+    expect(startOfExchangeWeek(utc(2026, 3, 8, 20, 0))).toEqual(expectedMonday); // Sun, after the 2am transition
+  });
+
+  it("resolves correctly across the fall-back DST transition week", () => {
+    // The transition week: Mon Oct 26 (EDT) - Sun Nov 1 2026 (fall back at
+    // 2am EDT on Nov 1). Monday's midnight is EDT (04:00 UTC).
+    const expectedMonday = utc(2026, 10, 26, 4, 0);
+    expect(startOfExchangeWeek(utc(2026, 10, 26, 15, 0))).toEqual(expectedMonday); // Mon, EDT
+    expect(startOfExchangeWeek(utc(2026, 11, 1, 20, 0))).toEqual(expectedMonday); // Sun, after the 2am transition
   });
 });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toCents } from "../trading/money";
-import { fetchQuotes } from "./alpaca";
+import { currentBarStart, fetchQuotes } from "./alpaca";
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return {
@@ -111,5 +111,38 @@ describe("fetchQuotes", () => {
     delete process.env.ALPACA_KEY_ID;
 
     await expect(fetchQuotes(["AAPL"])).rejects.toThrow(/Missing ALPACA_KEY_ID/);
+  });
+});
+
+// Every date is an explicit UTC instant, mirroring lib/trading/market-hours.test.ts's
+// convention, so this suite is deterministic regardless of when/where it runs.
+function utc(year: number, month: number, day: number, hour: number, minute = 0): Date {
+  return new Date(Date.UTC(year, month - 1, day, hour, minute));
+}
+
+describe("currentBarStart", () => {
+  it("floors 15Min to the most recent :00/:15/:30/:45 UTC boundary", () => {
+    expect(currentBarStart("15Min", utc(2026, 6, 10, 14, 37))).toEqual(utc(2026, 6, 10, 14, 30));
+  });
+
+  it("returns the exact instant unchanged when already on a 15Min boundary", () => {
+    expect(currentBarStart("15Min", utc(2026, 6, 10, 14, 30))).toEqual(utc(2026, 6, 10, 14, 30));
+  });
+
+  it("floors 1Hour to the top of the current hour", () => {
+    expect(currentBarStart("1Hour", utc(2026, 6, 10, 14, 59))).toEqual(utc(2026, 6, 10, 14, 0));
+  });
+
+  it("floors 1Day to midnight Eastern (EDT) of the current day", () => {
+    expect(currentBarStart("1Day", utc(2026, 6, 10, 18, 0))).toEqual(utc(2026, 6, 10, 4, 0));
+  });
+
+  it("floors 1Day to midnight Eastern (EST) of the current day", () => {
+    expect(currentBarStart("1Day", utc(2026, 1, 7, 18, 0))).toEqual(utc(2026, 1, 7, 5, 0));
+  });
+
+  it("floors 1Week to midnight Eastern Monday of the current week", () => {
+    // Wed Jun 10 2026 -> Monday Jun 8 2026, midnight EDT.
+    expect(currentBarStart("1Week", utc(2026, 6, 10, 18, 0))).toEqual(utc(2026, 6, 8, 4, 0));
   });
 });

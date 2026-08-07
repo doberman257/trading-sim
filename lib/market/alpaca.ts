@@ -1,5 +1,6 @@
 import "server-only";
 import { z } from "zod";
+import { startOfExchangeDay, startOfExchangeWeek } from "../trading/market-hours";
 import { toCents, type Cents } from "../trading/money";
 import type { Quote } from "../trading/types";
 
@@ -202,8 +203,13 @@ const AlpacaBarsResponseSchema = z.object({
   symbol: z.string(),
 });
 
-export type DailyBar = {
-  date: string; // "YYYY-MM-DD"
+export type Bar = {
+  // Full ISO instant of the bar's own start time - not sliced to a bare
+  // date, since intraday bars need to be told apart from others on the
+  // same calendar day. lib/trading/market-hours.ts's toExchangeDateKey is
+  // still the right tool when a caller specifically wants the Eastern
+  // trading-day a bar (or a fill) falls on.
+  timestamp: string;
   openCents: Cents;
   highCents: Cents;
   lowCents: Cents;
@@ -211,12 +217,12 @@ export type DailyBar = {
   volume: number;
 };
 
-// Shared by fetchDailyBars and fetchDailyBarsForSymbols - same conversion
+// Shared by every bars-fetching function in this file - same conversion
 // (float through a fixed 2-decimal string, never touching bigint arithmetic
-// directly) either way, so it lives in one place rather than two.
-function toDailyBar(bar: z.infer<typeof AlpacaBarSchema>): DailyBar {
+// directly) either way, so it lives in one place rather than several.
+function toBar(bar: z.infer<typeof AlpacaBarSchema>): Bar {
   return {
-    date: bar.t.slice(0, 10),
+    timestamp: bar.t,
     openCents: toCents(bar.o.toFixed(2)),
     highCents: toCents(bar.h.toFixed(2)),
     lowCents: toCents(bar.l.toFixed(2)),
@@ -225,28 +231,75 @@ function toDailyBar(bar: z.infer<typeof AlpacaBarSchema>): DailyBar {
   };
 }
 
-const DAILY_BARS_LOOKBACK_DAYS = 90;
+export type BarTimeframe = "15Min" | "1Hour" | "1Day" | "1Week";
 
-// Daily bars, most recent `DAILY_BARS_LOOKBACK_DAYS` calendar days - enough
-// for a short-history chart without pulling more than needed.
+const INTRADAY_BAR_MS: Record<"15Min" | "1Hour", number> = {
+  "15Min": 15 * 60 * 1000,
+  "1Hour": 60 * 60 * 1000,
+};
+
+// The exact instant separating "every completed bar" from "the bar still in
+// progress," for a given timeframe as of `now`. Exported for testing - this
+// is the one piece of arithmetic the whole completed/live cache split in
+// fetchBars depends on getting exactly right.
 //
-// Always fetched live (`cache: "no-store"`), even though most of what comes
-// back is completed, immutable history that CLAUDE.md's caching rule would
-// allow caching aggressively. This endpoint mixes both cases in one
-// response - today's still-forming bar rides along with every closed day
-// (confirmed empirically: the most recent bar on a trading day is today's,
-// with a fraction of a normal day's volume) - and this function has no
-// per-symbol cache to begin with, so splitting the response to cache only
-// the closed days would add real complexity for a page that loads this
-// once per visit, not a hot path the way quotes are. Simplicity over an
-// optimization nothing here currently needs.
+// 15Min/1Hour bars align to fixed UTC clock boundaries (:00/:15/:30/:45,
+// or the top of each hour) - confirmed empirically against real Alpaca
+// data - so flooring the raw UTC epoch is correct with no timezone
+// conversion needed. 1Day/1Week bars align to the Eastern trading
+// day/week, which does need the DST-aware conversion in market-hours.ts.
 //
-// `feed=iex` is required, not optional: the default feed is SIP, which
-// 403s ("subscription does not permit querying recent SIP data") on this
-// free-tier account for any range touching recent days - confirmed
-// empirically. Quotes don't need this because their default feed doesn't
-// hit the same restriction; bars does.
-export async function fetchDailyBars(symbol: string): Promise<DailyBar[]> {
+// This doesn't special-case market-closed hours (nights, weekends): the
+// boundary still advances every 15/60 minutes even though no new bar data
+// is actually being produced then, which means the completed-range cache
+// key (see fetchBars) keeps changing and doesn't hit as often as it
+// theoretically could outside market hours. An earlier version of this
+// tried to anchor to the last trading session instead, but that broke a
+// real case (a weekday evening's own, by-then-complete daily bar would
+// have been silently dropped) - correctness over that extra cache-hit rate.
+export function currentBarStart(timeframe: BarTimeframe, now: Date): Date {
+  switch (timeframe) {
+    case "15Min":
+    case "1Hour": {
+      const ms = INTRADAY_BAR_MS[timeframe];
+      return new Date(Math.floor(now.getTime() / ms) * ms);
+    }
+    case "1Day":
+      return startOfExchangeDay(now);
+    case "1Week":
+      return startOfExchangeWeek(now);
+  }
+}
+
+function barsUrl(symbol: string, timeframe: BarTimeframe, start: Date, end: Date): string {
+  return (
+    `${ALPACA_QUOTE_URL}/${symbol}/bars?timeframe=${timeframe}` +
+    `&start=${start.toISOString()}&end=${end.toISOString()}&limit=10000&feed=iex`
+  );
+}
+
+// Bars for one symbol at a given timeframe, looking back `lookbackMs` from
+// now. Implements CLAUDE.md's three-way caching rule for real, not just for
+// daily bars: the request is split in two at currentBarStart, not just the
+// response, because splitting the request is what makes the completed
+// half's URL - and therefore its Next.js Data Cache key - stay identical
+// for every call made during the same still-forming bar period. `cache:
+// "force-cache"` explicitly opts back into caching for that one fetch even
+// though the pages calling this are `force-dynamic` (which would otherwise
+// default every fetch to "no-store"). The forming half is always fetched
+// live and merged on afterward, exactly like the daily case already did,
+// so a chart never shows a stale value for the bar still in progress.
+//
+// `feed=iex` is required for every timeframe, not just daily - confirmed
+// empirically: the default feed 403s ("subscription does not permit
+// querying recent SIP data") on any range touching recent minutes/hours,
+// the same restriction found on the daily endpoint, at the same ~15-minute
+// boundary regardless of bar granularity.
+export async function fetchBars(
+  symbol: string,
+  timeframe: BarTimeframe,
+  lookbackMs: number,
+): Promise<Bar[]> {
   const keyId = process.env.ALPACA_KEY_ID;
   const secretKey = process.env.ALPACA_SECRET_KEY;
 
@@ -254,30 +307,35 @@ export async function fetchDailyBars(symbol: string): Promise<DailyBar[]> {
     throw new Error("Missing ALPACA_KEY_ID or ALPACA_SECRET_KEY environment variables");
   }
 
-  const end = new Date();
-  const start = new Date(end.getTime() - DAILY_BARS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-
-  const url =
-    `${ALPACA_QUOTE_URL}/${symbol}/bars?timeframe=1Day` +
-    `&start=${start.toISOString()}&end=${end.toISOString()}&limit=${DAILY_BARS_LOOKBACK_DAYS}&feed=iex`;
+  const headers = { "APCA-API-KEY-ID": keyId, "APCA-API-SECRET-KEY": secretKey };
+  const now = new Date();
+  const formingBarStart = currentBarStart(timeframe, now);
+  const start = new Date(now.getTime() - lookbackMs);
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        "APCA-API-KEY-ID": keyId,
-        "APCA-API-SECRET-KEY": secretKey,
-      },
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return [];
+    let completedBars: z.infer<typeof AlpacaBarSchema>[] = [];
+    if (start < formingBarStart) {
+      const completedResponse = await fetch(barsUrl(symbol, timeframe, start, formingBarStart), {
+        headers,
+        cache: "force-cache",
+      });
+      if (completedResponse.ok) {
+        const body: unknown = await completedResponse.json();
+        completedBars = AlpacaBarsResponseSchema.parse(body).bars ?? [];
+      }
     }
 
-    const body: unknown = await response.json();
-    const parsed = AlpacaBarsResponseSchema.parse(body);
+    const formingResponse = await fetch(barsUrl(symbol, timeframe, formingBarStart, now), {
+      headers,
+      cache: "no-store",
+    });
+    let formingBars: z.infer<typeof AlpacaBarSchema>[] = [];
+    if (formingResponse.ok) {
+      const body: unknown = await formingResponse.json();
+      formingBars = AlpacaBarsResponseSchema.parse(body).bars ?? [];
+    }
 
-    return (parsed.bars ?? []).map(toDailyBar);
+    return [...completedBars, ...formingBars].map(toBar);
   } catch {
     return [];
   }
@@ -302,11 +360,11 @@ const SPARKLINE_LOOKBACK_DAYS = 30;
 // Soft-fails to an empty map on any error, same as fetchQuotes and for the
 // same reason - a sparkline is decorative context, not something a page
 // should break over. `feed=iex` is required for the same reason as
-// fetchDailyBars (the default feed 403s on recent-day ranges).
+// fetchBars (the default feed 403s on recent-day ranges).
 export async function fetchDailyBarsForSymbols(
   symbols: string[],
   lookbackDays: number = SPARKLINE_LOOKBACK_DAYS,
-): Promise<Map<string, DailyBar[]>> {
+): Promise<Map<string, Bar[]>> {
   const uniqueSymbols = [...new Set(symbols)];
 
   if (uniqueSymbols.length === 0) {
@@ -350,11 +408,14 @@ export async function fetchDailyBarsForSymbols(
     const body: unknown = await response.json();
     const parsed = AlpacaMultiBarsResponseSchema.parse(body);
 
-    const result = new Map<string, DailyBar[]>();
+    const result = new Map<string, Bar[]>();
     for (const symbol of uniqueSymbols) {
       const bars = parsed.bars[symbol];
       if (bars) {
-        result.set(symbol, bars.map(toDailyBar));
+        result.set(
+          symbol,
+          bars.map((bar) => toBar(bar)),
+        );
       }
     }
     return result;

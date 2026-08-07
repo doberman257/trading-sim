@@ -1,11 +1,14 @@
-import { isBusinessDay, type Time } from "lightweight-charts";
+import { isBusinessDay, type Time, type UTCTimestamp } from "lightweight-charts";
+import type { BarTimeframe } from "@/lib/market/alpaca";
 
 // Kept in its own file, separate from StockChart.tsx: that component calls
 // createChart, which touches the DOM - pulling it into the default unit
 // suite (which runs under Vitest's "node" environment, no DOM) would risk
-// breaking on import alone. This file only imports the small type-guard
-// isBusinessDay and a type, so the actual logic here stays testable without
-// a browser, same reasoning as orderMessages.ts staying DB-free.
+// breaking on import alone. This file only imports small type-guards/types,
+// so the actual logic here stays testable without a browser, same reasoning
+// as orderMessages.ts staying DB-free. The BarTimeframe import is type-only
+// and erased at compile time, so it doesn't pull in alpaca.ts's server-only
+// guard or network code either.
 
 export function centsToDollars(cents: string): number {
   return Number(BigInt(cents)) / 100;
@@ -23,19 +26,61 @@ export function withAlpha(hex: string, alphaHex: string): string {
   return `${hex}${alphaHex}`;
 }
 
-// The library accepts a "YYYY-MM-DD" string as Time when data is set, but
-// there's no guarantee it hands the same string back from a crosshair-move
-// event - internally it may normalize to a BusinessDay object instead. Using
-// isBusinessDay (exported by the library itself, not a hand-rolled guess at
-// its internal representation) to reconstruct the same "YYYY-MM-DD" form
-// either way is what makes a crosshair-driven lookup reliable regardless of
-// which shape actually comes back.
-export function timeToDateKey(time: Time): string | undefined {
+// Converts a bar's full ISO timestamp into the Time representation
+// lightweight-charts expects for its own granularity.
+//
+// 1Day/1Week bars use a "YYYY-MM-DD" business-day string, not a numeric
+// timestamp: Alpaca's own daily/weekly bar timestamps are already midnight
+// Eastern (confirmed empirically to be DST-correct), and the business-day
+// string form is what makes the chart's time axis skip weekends/holidays
+// as adjacent bars instead of showing them as a wide empty gap.
+//
+// 15Min/1Hour bars use a numeric UTCTimestamp instead, since multiple bars
+// share the same calendar day - a bare date string can't tell them apart.
+export function barChartTime(timestamp: string, timeframe: BarTimeframe): Time {
+  if (timeframe === "1Day" || timeframe === "1Week") {
+    return timestamp.slice(0, 10);
+  }
+  return Math.floor(new Date(timestamp).getTime() / 1000) as UTCTimestamp;
+}
+
+// The library accepts the Time values barChartTime produces above, but
+// there's no guarantee it hands back the exact same shape from a
+// crosshair-move event - a business-day string may come back as a
+// BusinessDay object instead. Using isBusinessDay (exported by the library
+// itself, not a hand-rolled guess at its internal representation) to
+// reconstruct the same "YYYY-MM-DD" form either way is what makes a
+// crosshair-driven lookup reliable. A UTCTimestamp number passes through
+// unchanged - the library has no alternate representation for that case.
+export function normalizeChartTime(time: Time): string | number | undefined {
+  if (typeof time === "number") return time;
   if (typeof time === "string") return time;
   if (isBusinessDay(time)) {
     return `${time.year}-${String(time.month).padStart(2, "0")}-${String(time.day).padStart(2, "0")}`;
   }
   return undefined;
+}
+
+// The index of the last bar whose own timestamp is at or before `instant` -
+// i.e. the bar a trade fill at that instant belongs to, for placing a
+// marker. `barTimestamps` must be ascending (the order every bars-fetching
+// function in lib/market/alpaca.ts already returns), which is what lets
+// this stop scanning as soon as one bar is later than `instant` rather than
+// checking the rest. Returns -1 when every bar is later than `instant` (the
+// trade predates this chart's loaded range - nothing to anchor a marker
+// to).
+export function findBarIndexAtOrBefore(barTimestamps: readonly string[], instant: string): number {
+  const instantMs = new Date(instant).getTime();
+  let lastIndexAtOrBefore = -1;
+
+  for (let i = 0; i < barTimestamps.length; i++) {
+    if (new Date(barTimestamps[i]!).getTime() > instantMs) {
+      break;
+    }
+    lastIndexAtOrBefore = i;
+  }
+
+  return lastIndexAtOrBefore;
 }
 
 // True when a bar's own close is at or above its own open - used to color

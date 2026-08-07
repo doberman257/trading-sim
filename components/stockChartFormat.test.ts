@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  barChartTime,
   centsToDollars,
+  findBarIndexAtOrBefore,
   formatDollars,
   isUpBar,
-  timeToDateKey,
+  normalizeChartTime,
   withAlpha,
 } from "./stockChartFormat";
 
@@ -59,22 +61,68 @@ describe("isUpBar", () => {
   });
 });
 
-describe("timeToDateKey", () => {
+describe("barChartTime", () => {
+  it("slices a daily bar's timestamp to a business-day date string", () => {
+    expect(barChartTime("2026-08-06T04:00:00Z", "1Day")).toBe("2026-08-06");
+  });
+
+  it("slices a weekly bar's timestamp to a business-day date string", () => {
+    expect(barChartTime("2026-04-13T04:00:00Z", "1Week")).toBe("2026-04-13");
+  });
+
+  it("converts a 15-minute bar's timestamp to a numeric UTCTimestamp", () => {
+    expect(barChartTime("2026-08-06T14:30:00Z", "15Min")).toBe(
+      Math.floor(new Date("2026-08-06T14:30:00Z").getTime() / 1000),
+    );
+  });
+
+  it("converts an hourly bar's timestamp to a numeric UTCTimestamp", () => {
+    expect(barChartTime("2026-08-06T14:00:00Z", "1Hour")).toBe(
+      Math.floor(new Date("2026-08-06T14:00:00Z").getTime() / 1000),
+    );
+  });
+});
+
+describe("normalizeChartTime", () => {
   it("passes a string time through unchanged", () => {
-    expect(timeToDateKey("2026-08-06")).toBe("2026-08-06");
+    expect(normalizeChartTime("2026-08-06")).toBe("2026-08-06");
+  });
+
+  it("passes a numeric UTCTimestamp through unchanged", () => {
+    expect(
+      normalizeChartTime(1_700_000_000 as unknown as Parameters<typeof normalizeChartTime>[0]),
+    ).toBe(1_700_000_000);
   });
 
   it("reconstructs a date string from a BusinessDay object", () => {
-    expect(timeToDateKey({ year: 2026, month: 8, day: 6 })).toBe("2026-08-06");
+    expect(normalizeChartTime({ year: 2026, month: 8, day: 6 })).toBe("2026-08-06");
   });
 
   it("pads single-digit month and day in a BusinessDay object", () => {
-    expect(timeToDateKey({ year: 2026, month: 1, day: 5 })).toBe("2026-01-05");
+    expect(normalizeChartTime({ year: 2026, month: 1, day: 5 })).toBe("2026-01-05");
+  });
+});
+
+describe("findBarIndexAtOrBefore", () => {
+  const timestamps = ["2026-08-06T14:00:00Z", "2026-08-06T14:15:00Z", "2026-08-06T14:30:00Z"];
+
+  it("finds the exact matching bar", () => {
+    expect(findBarIndexAtOrBefore(timestamps, "2026-08-06T14:15:00Z")).toBe(1);
   });
 
-  it("returns undefined for a UTCTimestamp number, which this chart never uses", () => {
-    expect(timeToDateKey(1_700_000_000 as unknown as Parameters<typeof timeToDateKey>[0])).toBe(
-      undefined,
-    );
+  it("finds the last bar at or before an instant that falls between bars", () => {
+    expect(findBarIndexAtOrBefore(timestamps, "2026-08-06T14:20:00Z")).toBe(1);
+  });
+
+  it("finds the last bar when the instant is after every bar", () => {
+    expect(findBarIndexAtOrBefore(timestamps, "2026-08-06T15:00:00Z")).toBe(2);
+  });
+
+  it("returns -1 when the instant is before every bar", () => {
+    expect(findBarIndexAtOrBefore(timestamps, "2026-08-06T13:00:00Z")).toBe(-1);
+  });
+
+  it("returns -1 for an empty bar list", () => {
+    expect(findBarIndexAtOrBefore([], "2026-08-06T14:15:00Z")).toBe(-1);
   });
 });

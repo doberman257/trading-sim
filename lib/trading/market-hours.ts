@@ -184,6 +184,46 @@ export function toExchangeDateKey(date: Date): string {
   return dateKey(getEasternParts(date));
 }
 
+// The UTC instant of midnight, Eastern time, on the trading day `date`
+// falls on - the boundary between "today's still-forming bar" and every
+// completed day before it. Used to split a completed/live bars fetch (see
+// lib/market/alpaca.ts) at exactly the right instant regardless of DST.
+export function startOfExchangeDay(date: Date): Date {
+  const parts = getEasternParts(date);
+  return easternWallClockToUtc(parts.year, parts.month, parts.day, 0, 0);
+}
+
+// The UTC instant of midnight, Eastern time, on the Monday of the trading
+// week `date` falls on. Weeks start Monday, matching how markets and
+// weekly bars are conventionally aligned - not the Intl/ISO default of
+// Sunday or Monday-varies-by-locale.
+export function startOfExchangeWeek(date: Date): Date {
+  const parts = getEasternParts(date);
+  // Sunday (weekday 0) is 6 days after the preceding Monday; every other
+  // weekday is (weekday - 1) days after its own week's Monday.
+  const daysSinceMonday = parts.weekday === 0 ? 6 : parts.weekday - 1;
+
+  // Subtract whole calendar days in an abstract UTC calendar (noon, to stay
+  // clear of any day-boundary edge case), then convert the resulting
+  // calendar date to a real instant once, at the end - rather than
+  // subtracting milliseconds from an already-DST-resolved Eastern instant,
+  // which would need a case-by-case argument for why that's still safe
+  // across a week containing a DST transition Sunday. This construction
+  // doesn't need that argument: only easternWallClockToUtc ever has to
+  // reason about DST, and it does so for the exact calendar date being
+  // asked about, not for a date arrived at by subtracting real time.
+  const abstractMonday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12));
+  abstractMonday.setUTCDate(abstractMonday.getUTCDate() - daysSinceMonday);
+
+  return easternWallClockToUtc(
+    abstractMonday.getUTCFullYear(),
+    abstractMonday.getUTCMonth() + 1,
+    abstractMonday.getUTCDate(),
+    0,
+    0,
+  );
+}
+
 // Converts an Eastern wall-clock time back into a precise UTC instant.
 // America/New_York is always exactly UTC-5 (EST) or UTC-4 (EDT), never
 // anything else, so guessing EST and checking the round trip through
