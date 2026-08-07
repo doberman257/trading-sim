@@ -119,6 +119,7 @@ export async function placeMarketOrder({
 }
 
 export type SymbolOrderFill = {
+  id: string;
   side: Side;
   quantity: number;
   filledPriceCents: bigint;
@@ -126,8 +127,9 @@ export type SymbolOrderFill = {
 };
 
 // Every filled order for one symbol, oldest first - what the stock detail
-// page's chart draws trade markers from. Mapping a fill's UTC filledAt onto
-// the Eastern trading day it belongs to (see toExchangeDateKey in
+// page's chart draws trade markers from, and what its Orders tab lists
+// (reversed there for newest-first display). Mapping a fill's UTC filledAt
+// onto the Eastern trading day it belongs to (see toExchangeDateKey in
 // lib/trading/market-hours.ts) is the caller's job, not this query's - this
 // stays a plain read.
 export async function getFilledOrdersForSymbol(
@@ -136,6 +138,7 @@ export async function getFilledOrdersForSymbol(
 ): Promise<SymbolOrderFill[]> {
   const rows = await db
     .select({
+      id: orders.id,
       side: orders.side,
       quantity: orders.quantity,
       filledPriceCents: orders.filledPriceCents,
@@ -156,6 +159,7 @@ export async function getFilledOrdersForSymbol(
       throw new Error(`Filled order for ${symbol} is missing filledPriceCents/filledAt`);
     }
     return {
+      id: row.id,
       side: row.side,
       quantity: row.quantity,
       filledPriceCents: row.filledPriceCents,

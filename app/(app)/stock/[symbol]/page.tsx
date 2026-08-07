@@ -2,7 +2,9 @@ import { notFound, redirect } from "next/navigation";
 import { MarketStatusBanner } from "@/components/MarketStatusBanner";
 import { OrderTicket } from "@/components/OrderTicket";
 import { StockChart } from "@/components/StockChart";
+import { StockDetailTabs } from "@/components/StockDetailTabs";
 import { StockHeader } from "@/components/StockHeader";
+import { StockOrderHistory } from "@/components/StockOrderHistory";
 import { StockPositionSummary } from "@/components/StockPositionSummary";
 import { StockQuoteCard } from "@/components/StockQuoteCard";
 import { getOrCreateAccount } from "@/lib/db/accounts";
@@ -10,12 +12,12 @@ import { getAssetBySymbol } from "@/lib/db/assets";
 import { getFilledOrdersForSymbol } from "@/lib/db/orders";
 import { getPosition } from "@/lib/db/portfolio";
 import { isSymbolWatched } from "@/lib/db/watchlist";
+import type { BarTimeframe } from "@/lib/market/alpaca";
 import { fetchBars, fetchQuotes } from "@/lib/market/alpaca";
 import { RANGE_LOOKBACK_MS, type ChartRange } from "@/lib/market/chart-timeframes";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getMarketStatus } from "@/lib/trading/market-hours";
 import { SymbolSchema } from "@/lib/trading/symbol";
-import type { BarTimeframe } from "@/lib/market/alpaca";
 
 // Live quotes must never be served from a cached snapshot of this page -
 // see the caching rules in CLAUDE.md.
@@ -62,6 +64,15 @@ export default async function StockPage({ params }: StockPageProps) {
   const marketStatus = getMarketStatus(new Date());
   const isStale = !marketStatus.open;
 
+  const orderTicket = (
+    <OrderTicket
+      cashCentsString={account.cashCents.toString()}
+      heldPositions={position ? [{ symbol, quantity: position.quantity }] : []}
+      marketStatus={marketStatus}
+      fixedSymbol={symbol}
+    />
+  );
+
   return (
     <main className="bg-base min-h-screen p-3">
       <div className="mx-auto flex max-w-4xl flex-col gap-3">
@@ -88,6 +99,8 @@ export default async function StockPage({ params }: StockPageProps) {
           </p>
         )}
 
+        {/* Price and spread stay outside the tabs, always visible - never
+            behind a click, regardless of which tab is active. */}
         <StockQuoteCard
           symbol={symbol}
           bidCents={quote?.bidCents ?? null}
@@ -95,51 +108,45 @@ export default async function StockPage({ params }: StockPageProps) {
           isStale={isStale}
         />
 
-        <StockChart
-          symbol={symbol}
-          initialBars={initialBars.map((bar) => ({
-            timestamp: bar.timestamp,
-            openCents: bar.openCents.toString(),
-            highCents: bar.highCents.toString(),
-            lowCents: bar.lowCents.toString(),
-            closeCents: bar.closeCents.toString(),
-            volume: bar.volume,
-          }))}
-          initialTimeframe={DEFAULT_TIMEFRAME}
-          initialRange={DEFAULT_RANGE}
-          avgCostCents={position ? position.avgCostCents.toString() : null}
-          trades={fills.map((fill) => ({
-            timestamp: fill.filledAt.toISOString(),
-            side: fill.side,
-            quantity: fill.quantity,
-            priceCents: fill.filledPriceCents.toString(),
-          }))}
+        <StockDetailTabs
+          chart={
+            <StockChart
+              symbol={symbol}
+              initialBars={initialBars.map((bar) => ({
+                timestamp: bar.timestamp,
+                openCents: bar.openCents.toString(),
+                highCents: bar.highCents.toString(),
+                lowCents: bar.lowCents.toString(),
+                closeCents: bar.closeCents.toString(),
+                volume: bar.volume,
+              }))}
+              initialTimeframe={DEFAULT_TIMEFRAME}
+              initialRange={DEFAULT_RANGE}
+              avgCostCents={position ? position.avgCostCents.toString() : null}
+              trades={fills.map((fill) => ({
+                timestamp: fill.filledAt.toISOString(),
+                side: fill.side,
+                quantity: fill.quantity,
+                priceCents: fill.filledPriceCents.toString(),
+              }))}
+            />
+          }
+          position={
+            position ? (
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
+                {orderTicket}
+                <StockPositionSummary
+                  quantity={position.quantity}
+                  avgCostCents={position.avgCostCents}
+                  bidCents={quote?.bidCents ?? null}
+                />
+              </div>
+            ) : (
+              <div className="max-w-[320px]">{orderTicket}</div>
+            )
+          }
+          orders={<StockOrderHistory fills={[...fills].reverse()} />}
         />
-
-        {position ? (
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
-            <OrderTicket
-              cashCentsString={account.cashCents.toString()}
-              heldPositions={[{ symbol, quantity: position.quantity }]}
-              marketStatus={marketStatus}
-              fixedSymbol={symbol}
-            />
-            <StockPositionSummary
-              quantity={position.quantity}
-              avgCostCents={position.avgCostCents}
-              bidCents={quote?.bidCents ?? null}
-            />
-          </div>
-        ) : (
-          <div className="max-w-[320px]">
-            <OrderTicket
-              cashCentsString={account.cashCents.toString()}
-              heldPositions={[]}
-              marketStatus={marketStatus}
-              fixedSymbol={symbol}
-            />
-          </div>
-        )}
       </div>
     </main>
   );
