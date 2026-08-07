@@ -168,6 +168,22 @@ function dateKey(parts: Pick<EasternParts, "year" | "month" | "day">): string {
   return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
+// The Eastern trading-day date ("YYYY-MM-DD") a UTC instant falls on -
+// e.g. for mapping an order's UTC filledAt onto the daily bar it belongs to.
+// Bar dates from Alpaca (lib/market/alpaca.ts's fetchDailyBars) are already
+// in this exact form, confirmed empirically to be DST-correct on Alpaca's
+// side (the bar's own UTC hour shifts between 04:00 and 05:00 across the
+// year so its date portion always lands on the right Eastern calendar day).
+// An order's filledAt has no such guarantee - a naive `.toISOString().slice(0,
+// 10)` happens to agree with this function for any fill during regular
+// market hours (9:30am-4pm ET never crosses a UTC midnight boundary), but
+// depending on that coincidence instead of doing the real conversion is
+// exactly the kind of thing that quietly breaks the day extended-hours
+// trading is ever added.
+export function toExchangeDateKey(date: Date): string {
+  return dateKey(getEasternParts(date));
+}
+
 // Converts an Eastern wall-clock time back into a precise UTC instant.
 // America/New_York is always exactly UTC-5 (EST) or UTC-4 (EDT), never
 // anything else, so guessing EST and checking the round trip through

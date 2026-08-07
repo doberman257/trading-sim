@@ -7,11 +7,12 @@ import { StockPositionSummary } from "@/components/StockPositionSummary";
 import { StockQuoteCard } from "@/components/StockQuoteCard";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getAssetBySymbol } from "@/lib/db/assets";
+import { getFilledOrdersForSymbol } from "@/lib/db/orders";
 import { getPosition } from "@/lib/db/portfolio";
 import { isSymbolWatched } from "@/lib/db/watchlist";
 import { fetchDailyBars, fetchQuotes } from "@/lib/market/alpaca";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { getMarketStatus } from "@/lib/trading/market-hours";
+import { getMarketStatus, toExchangeDateKey } from "@/lib/trading/market-hours";
 import { SymbolSchema } from "@/lib/trading/symbol";
 
 // Live quotes must never be served from a cached snapshot of this page -
@@ -43,12 +44,13 @@ export default async function StockPage({ params }: StockPageProps) {
 
   const account = await getOrCreateAccount(user.id);
 
-  const [assetInfo, { quotes }, position, watched, dailyBars] = await Promise.all([
+  const [assetInfo, { quotes }, position, watched, dailyBars, fills] = await Promise.all([
     getAssetBySymbol(symbol),
     fetchQuotes([symbol]),
     getPosition(account.id, symbol),
     isSymbolWatched(account.id, symbol),
     fetchDailyBars(symbol),
+    getFilledOrdersForSymbol(account.id, symbol),
   ]);
 
   const quote = quotes.get(symbol) ?? null;
@@ -95,6 +97,14 @@ export default async function StockPage({ params }: StockPageProps) {
             highCents: bar.highCents.toString(),
             lowCents: bar.lowCents.toString(),
             closeCents: bar.closeCents.toString(),
+            volume: bar.volume,
+          }))}
+          avgCostCents={position ? position.avgCostCents.toString() : null}
+          trades={fills.map((fill) => ({
+            date: toExchangeDateKey(fill.filledAt),
+            side: fill.side,
+            quantity: fill.quantity,
+            priceCents: fill.filledPriceCents.toString(),
           }))}
         />
 

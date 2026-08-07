@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { fetchQuote } from "../market/alpaca";
 import { executeMarketOrder } from "../trading/execute";
 import type { OrderResult, Side } from "../trading/types";
@@ -115,5 +115,51 @@ export async function placeMarketOrder({
     });
 
     return result;
+  });
+}
+
+export type SymbolOrderFill = {
+  side: Side;
+  quantity: number;
+  filledPriceCents: bigint;
+  filledAt: Date;
+};
+
+// Every filled order for one symbol, oldest first - what the stock detail
+// page's chart draws trade markers from. Mapping a fill's UTC filledAt onto
+// the Eastern trading day it belongs to (see toExchangeDateKey in
+// lib/trading/market-hours.ts) is the caller's job, not this query's - this
+// stays a plain read.
+export async function getFilledOrdersForSymbol(
+  accountId: string,
+  symbol: string,
+): Promise<SymbolOrderFill[]> {
+  const rows = await db
+    .select({
+      side: orders.side,
+      quantity: orders.quantity,
+      filledPriceCents: orders.filledPriceCents,
+      filledAt: orders.filledAt,
+    })
+    .from(orders)
+    .where(
+      and(eq(orders.accountId, accountId), eq(orders.symbol, symbol), eq(orders.status, "filled")),
+    )
+    .orderBy(asc(orders.filledAt));
+
+  return rows.map((row) => {
+    // filledPriceCents/filledAt are nullable columns in the schema (null for
+    // pending/rejected/cancelled orders) - the "filled" status filter above
+    // guarantees both are set for every row here, so this narrows rather
+    // than propagating an impossible null case to every caller.
+    if (row.filledPriceCents === null || row.filledAt === null) {
+      throw new Error(`Filled order for ${symbol} is missing filledPriceCents/filledAt`);
+    }
+    return {
+      side: row.side,
+      quantity: row.quantity,
+      filledPriceCents: row.filledPriceCents,
+      filledAt: row.filledAt,
+    };
   });
 }

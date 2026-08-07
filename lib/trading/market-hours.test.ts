@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { getMarketStatus, HOLIDAY_DATA_VALID_THROUGH, isMarketOpen } from "./market-hours";
+import {
+  getMarketStatus,
+  HOLIDAY_DATA_VALID_THROUGH,
+  isMarketOpen,
+  toExchangeDateKey,
+} from "./market-hours";
 
 // Every date below is built from an explicit UTC instant (never local time),
 // so this suite behaves identically regardless of the machine or CI
@@ -178,6 +183,40 @@ describe("holiday calendar exceptions", () => {
     expect(isMarketOpen(utc(2027, 12, 31, 15, 0))).toBe(true);
     // Mon Jan 3, 2028, EST: 10:00 ET = 15:00 UTC.
     expect(isMarketOpen(utc(2028, 1, 3, 15, 0))).toBe(true);
+  });
+});
+
+describe("toExchangeDateKey", () => {
+  it("maps a regular-hours EDT fill to the same UTC calendar day", () => {
+    // Wed Jun 10 2026, EDT (UTC-4): 10:32 ET = 14:32 UTC - same UTC date.
+    expect(toExchangeDateKey(utc(2026, 6, 10, 14, 32))).toBe("2026-06-10");
+  });
+
+  it("maps a regular-hours EST fill to the same UTC calendar day", () => {
+    // Wed Jan 7 2026, EST (UTC-5): 10:32 ET = 15:32 UTC - same UTC date.
+    expect(toExchangeDateKey(utc(2026, 1, 7, 15, 32))).toBe("2026-01-07");
+  });
+
+  it("rolls a late-UTC-evening EDT instant back to the earlier Eastern date", () => {
+    // Wed Jun 10 2026, 23:00 UTC = 19:00 ET - still Jun 10 in both, but
+    // close to the boundary a naive same-day assumption could get wrong.
+    expect(toExchangeDateKey(utc(2026, 6, 10, 23, 0))).toBe("2026-06-10");
+  });
+
+  it("rolls a just-after-midnight UTC instant back to the previous Eastern date", () => {
+    // Thu Jun 11 2026, 02:00 UTC = Wed Jun 10, 22:00 EDT - a UTC date that
+    // does NOT match the Eastern trading day. This is exactly the case a
+    // bare `.toISOString().slice(0, 10)` on the raw UTC timestamp gets
+    // wrong - it would return "2026-06-11" instead of "2026-06-10".
+    expect(toExchangeDateKey(utc(2026, 6, 11, 2, 0))).toBe("2026-06-10");
+  });
+
+  it("agrees with a bar's own date field across the EST/EDT boundary", () => {
+    // Confirmed empirically against real Alpaca daily-bar data: a bar's `t`
+    // is "2026-07-28T04:00:00Z" in EDT and "2026-01-05T05:00:00Z" in EST -
+    // both are midnight Eastern on their respective bar dates.
+    expect(toExchangeDateKey(new Date("2026-07-28T04:00:00Z"))).toBe("2026-07-28");
+    expect(toExchangeDateKey(new Date("2026-01-05T05:00:00Z"))).toBe("2026-01-05");
   });
 });
 
