@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getMarketStatus } from "@/lib/trading/market-hours";
 import { toCents } from "@/lib/trading/money";
-import { describeRejection, estimatedAmountLabel } from "./orderMessages";
+import { describeRejection, estimatedAmountLabel, limitOrderAmountLabel } from "./orderMessages";
 
 function utc(year: number, month: number, day: number, hour: number, minute = 0): Date {
   return new Date(Date.UTC(year, month - 1, day, hour, minute));
@@ -18,6 +18,16 @@ describe("estimatedAmountLabel", () => {
 
   it("calls a sell proceeds, not a cost - money comes in, not out", () => {
     expect(estimatedAmountLabel("sell")).toBe("Estimated proceeds (bid)");
+  });
+});
+
+describe("limitOrderAmountLabel", () => {
+  it("calls a buy's bound a max cost, not an estimate - the guarantee is firmer than that", () => {
+    expect(limitOrderAmountLabel("buy")).toBe("Max cost (limit)");
+  });
+
+  it("calls a sell's bound min proceeds", () => {
+    expect(limitOrderAmountLabel("sell")).toBe("Min proceeds (limit)");
   });
 });
 
@@ -113,5 +123,27 @@ describe("describeRejection", () => {
       marketStatus: OPEN_STATUS,
     });
     expect(message).toBe("Enter a whole number of shares greater than zero.");
+  });
+
+  it("gives inline validation guidance for invalid_limit_price", () => {
+    const message = describeRejection("invalid_limit_price", {
+      symbol: "AAPL",
+      heldQuantity: 0,
+      neededCents: null,
+      availableCents: 0n,
+      marketStatus: OPEN_STATUS,
+    });
+    expect(message).toBe("Enter a limit price greater than zero.");
+  });
+
+  it('explains "no_quote" without implying the market is closed', () => {
+    const message = describeRejection("no_quote", {
+      symbol: "AAPL",
+      heldQuantity: 0,
+      neededCents: null,
+      availableCents: 0n,
+      marketStatus: OPEN_STATUS,
+    });
+    expect(message).toContain("AAPL");
   });
 });

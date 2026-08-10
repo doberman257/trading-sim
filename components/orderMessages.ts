@@ -11,6 +11,17 @@ export function estimatedAmountLabel(side: Side): string {
   return side === "buy" ? "Estimated cost (ask)" : "Estimated proceeds (bid)";
 }
 
+// A limit order's own reference point is the limit price, not the current
+// ask/bid - and it's a bound, not an estimate: a buy limit only ever fills
+// at its limit price or better (see lib/trading/limit-fill.ts), so the
+// real cost is guaranteed to be at most this; a sell limit only ever fills
+// at its limit or better, so real proceeds are guaranteed to be at least
+// this. Wording that said "estimated" here would undersell how firm that
+// guarantee actually is.
+export function limitOrderAmountLabel(side: Side): string {
+  return side === "buy" ? "Max cost (limit)" : "Min proceeds (limit)";
+}
+
 // Kept in its own file, separate from OrderTicket.tsx: that component
 // imports Server Actions which transitively import lib/db (a real Postgres
 // connection at module load, per lib/db/client.ts), which would make this
@@ -47,8 +58,12 @@ export function describeRejection(
       return closedMessage(context.marketStatus);
     case "stale_quote":
       return "The price quote used for this order has gone stale. Try submitting again for a fresh price.";
+    case "no_quote":
+      return `No live two-sided quote is available for ${context.symbol} right now - try again once the market has an active price.`;
     case "invalid_quantity":
       return "Enter a whole number of shares greater than zero.";
+    case "invalid_limit_price":
+      return "Enter a limit price greater than zero.";
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;

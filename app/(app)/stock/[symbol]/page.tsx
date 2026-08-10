@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { MarketStatusBanner } from "@/components/MarketStatusBanner";
 import { OrderTicket } from "@/components/OrderTicket";
+import { PendingOrdersPanel } from "@/components/PendingOrdersPanel";
 import { StockChart } from "@/components/StockChart";
 import { StockDetailTabs } from "@/components/StockDetailTabs";
 import { StockHeader } from "@/components/StockHeader";
@@ -9,7 +10,8 @@ import { StockPositionSummary } from "@/components/StockPositionSummary";
 import { StockQuoteCard } from "@/components/StockQuoteCard";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getAssetBySymbol } from "@/lib/db/assets";
-import { getFilledOrdersForSymbol } from "@/lib/db/orders";
+import { getLastLimitOrderWorkerRun } from "@/lib/db/limit-order-worker";
+import { getFilledOrdersForSymbol, getPendingOrdersForAccount } from "@/lib/db/orders";
 import { getPosition } from "@/lib/db/portfolio";
 import { isSymbolWatched } from "@/lib/db/watchlist";
 import type { BarTimeframe } from "@/lib/market/alpaca";
@@ -18,6 +20,7 @@ import { RANGE_LOOKBACK_MS, type ChartRange } from "@/lib/market/chart-timeframe
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getMarketStatus } from "@/lib/trading/market-hours";
 import { SymbolSchema } from "@/lib/trading/symbol";
+import { isWorkerRunStale } from "@/lib/trading/worker-staleness";
 
 // Live quotes must never be served from a cached snapshot of this page -
 // see the caching rules in CLAUDE.md.
@@ -51,18 +54,34 @@ export default async function StockPage({ params }: StockPageProps) {
 
   const account = await getOrCreateAccount(user.id);
 
-  const [assetInfo, { quotes }, position, watched, initialBars, fills] = await Promise.all([
+  const [
+    assetInfo,
+    { quotes },
+    position,
+    watched,
+    initialBars,
+    fills,
+    pendingOrders,
+    lastWorkerRun,
+  ] = await Promise.all([
     getAssetBySymbol(symbol),
     fetchQuotes([symbol]),
     getPosition(account.id, symbol),
     isSymbolWatched(account.id, symbol),
     fetchBars(symbol, DEFAULT_TIMEFRAME, RANGE_LOOKBACK_MS[DEFAULT_RANGE]),
     getFilledOrdersForSymbol(account.id, symbol),
+    getPendingOrdersForAccount(account.id, symbol),
+    getLastLimitOrderWorkerRun(),
   ]);
 
   const quote = quotes.get(symbol) ?? null;
   const marketStatus = getMarketStatus(new Date());
   const isStale = !marketStatus.open;
+  // Never let a user believe a pending order is being actively watched if
+  // it might not be - see lib/trading/worker-staleness.ts.
+  const workerStale =
+    !lastWorkerRun ||
+    isWorkerRunStale(Date.now() - lastWorkerRun.startedAt.getTime(), marketStatus.open);
 
   const orderTicket = (
     <OrderTicket
@@ -132,18 +151,30 @@ export default async function StockPage({ params }: StockPageProps) {
             />
           }
           position={
-            position ? (
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
-                {orderTicket}
-                <StockPositionSummary
-                  quantity={position.quantity}
-                  avgCostCents={position.avgCostCents}
-                  bidCents={quote?.bidCents ?? null}
-                />
-              </div>
-            ) : (
-              <div className="max-w-[320px]">{orderTicket}</div>
-            )
+            <div className="flex flex-col gap-3">
+              {position ? (
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
+                  {orderTicket}
+                  <StockPositionSummary
+                    quantity={position.quantity}
+                    avgCostCents={position.avgCostCents}
+                    bidCents={quote?.bidCents ?? null}
+                  />
+                </div>
+              ) : (
+                <div className="max-w-[320px]">{orderTicket}</div>
+              )}
+              <PendingOrdersPanel
+                orders={pendingOrders.map((order) => ({
+                  id: order.id,
+                  symbol: order.symbol,
+                  side: order.side,
+                  quantity: order.quantity,
+                  limitPriceCents: order.limitPriceCents.toString(),
+                }))}
+                workerStale={workerStale}
+              />
+            </div>
           }
           orders={<StockOrderHistory fills={[...fills].reverse()} />}
         />

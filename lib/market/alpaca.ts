@@ -2,7 +2,22 @@ import "server-only";
 import { z } from "zod";
 import { startOfExchangeDay, startOfExchangeWeek } from "../trading/market-hours";
 import { toCents, type Cents } from "../trading/money";
+import { isValidTwoSidedQuote } from "../trading/quote";
 import type { Quote } from "../trading/types";
+
+// Thrown by fetchQuote when Alpaca's response parses fine but reports a
+// zero-priced bid or ask - a real, normal market condition (most often the
+// market being closed), not a config error like the missing-credentials
+// case above it. Kept as its own class, not a generic Error, so callers
+// that need to treat this as an ordinary "no quote right now" outcome
+// (rather than letting it propagate as an unhandled failure) can catch it
+// specifically - see placeMarketOrder in lib/db/orders.ts.
+export class NoTwoSidedQuoteError extends Error {
+  constructor(symbol: string) {
+    super(`No two-sided quote available for ${symbol} (bid or ask is zero)`);
+    this.name = "NoTwoSidedQuoteError";
+  }
+}
 
 const ALPACA_QUOTE_URL = "https://data.alpaca.markets/v2/stocks";
 // The assets list lives on the trading API, not the market-data API - a
@@ -69,12 +84,22 @@ export async function fetchQuote(symbol: string): Promise<Quote> {
   const body: unknown = await response.json();
   const parsed = AlpacaQuoteResponseSchema.parse(body);
 
+  const bidCents = toCents(parsed.quote.bp.toFixed(2));
+  const askCents = toCents(parsed.quote.ap.toFixed(2));
+
+  // Real, confirmed Alpaca behavior, not a hypothetical: it reports 0 for
+  // whichever side has no active quotation right now (most often while the
+  // market is closed), not an omitted field. A 0 there is nonsensical as a
+  // price - passing it through would let a caller compute a negative
+  // spread or, worse, fill an order at $0.00.
+  if (!isValidTwoSidedQuote(bidCents, askCents)) {
+    throw new NoTwoSidedQuoteError(symbol);
+  }
+
   return {
     symbol: parsed.symbol,
-    // Alpaca returns floats; convert through a fixed 2-decimal string so the
-    // float never touches bigint arithmetic directly.
-    bidCents: toCents(parsed.quote.bp.toFixed(2)),
-    askCents: toCents(parsed.quote.ap.toFixed(2)),
+    bidCents,
+    askCents,
     timestamp: new Date(parsed.quote.t),
   };
 }
@@ -123,14 +148,20 @@ export async function fetchQuotes(symbols: string[]): Promise<QuotesResult> {
     const quotes = new Map<string, Quote>();
     for (const symbol of uniqueSymbols) {
       const raw = parsed.quotes[symbol];
-      if (raw) {
-        quotes.set(symbol, {
-          symbol,
-          bidCents: toCents(raw.bp.toFixed(2)),
-          askCents: toCents(raw.ap.toFixed(2)),
-          timestamp: new Date(raw.t),
-        });
-      }
+      if (!raw) continue;
+
+      const bidCents = toCents(raw.bp.toFixed(2));
+      const askCents = toCents(raw.ap.toFixed(2));
+
+      // Same real Alpaca behavior as fetchQuote's single-symbol path: a
+      // zero-priced side means no active quotation, not a real price.
+      // Left out of `quotes` entirely so it falls into failedSymbols below
+      // and every caller's existing "no quote for this symbol" rendering
+      // path handles it - the same path already used for a symbol Alpaca
+      // omits outright, since the two cases mean the same thing to a caller.
+      if (!isValidTwoSidedQuote(bidCents, askCents)) continue;
+
+      quotes.set(symbol, { symbol, bidCents, askCents, timestamp: new Date(raw.t) });
     }
 
     const failedSymbols = uniqueSymbols.filter((symbol) => !quotes.has(symbol));

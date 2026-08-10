@@ -1,14 +1,18 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition, type FormEvent } from "react";
 import { closedMessage } from "./MarketStatusBanner";
-import { describeRejection, estimatedAmountLabel } from "./orderMessages";
+import { describeRejection, estimatedAmountLabel, limitOrderAmountLabel } from "./orderMessages";
 import { getQuoteForSymbol } from "@/app/actions/quote";
 import { placeTrade } from "@/app/actions/trade";
 import type { MarketStatus } from "@/lib/trading/market-hours";
-import { formatCents, multiply, type Cents } from "@/lib/trading/money";
+import { formatCents, multiply, toCents, type Cents } from "@/lib/trading/money";
+import { describeWideSpreadWarning, isSpreadImplausiblyWide } from "@/lib/trading/quote";
 import { SymbolSchema } from "@/lib/trading/symbol";
 import type { RejectReason, Side } from "@/lib/trading/types";
+
+type OrderType = "market" | "limit";
 
 export type OrderTicketProps = {
   // Cash crosses the Server -> Client Component boundary as a string, not a
@@ -28,6 +32,7 @@ export type OrderTicketProps = {
 
 type SubmitOutcome =
   | { kind: "success"; fillPriceCents: Cents; quantity: number; symbol: string; side: Side }
+  | { kind: "limit_pending"; limitPriceCents: Cents; quantity: number; symbol: string; side: Side }
   | { kind: "rejected"; reason: RejectReason }
   | { kind: "error" };
 
@@ -43,10 +48,13 @@ export function OrderTicket({
   fixedSymbol,
 }: OrderTicketProps) {
   const cashCents = BigInt(cashCentsString);
+  const router = useRouter();
 
+  const [orderType, setOrderType] = useState<OrderType>("market");
   const [side, setSide] = useState<Side>("buy");
   const [symbolInput, setSymbolInput] = useState(fixedSymbol ?? "");
   const [quantityInput, setQuantityInput] = useState("");
+  const [limitPriceInput, setLimitPriceInput] = useState("");
   const [quote, setQuote] = useState<{ bidCents: Cents; askCents: Cents } | null>(null);
   const [quoteStatus, setQuoteStatus] = useState<"idle" | "loading" | "unavailable">("idle");
   const [outcome, setOutcome] = useState<SubmitOutcome | null>(null);
@@ -58,6 +66,20 @@ export function OrderTicket({
   const quantity = Number(quantityInput);
   const isValidQuantity = Number.isInteger(quantity) && quantity > 0;
   const heldQuantity = heldPositions.find((position) => position.symbol === symbol)?.quantity ?? 0;
+
+  // toCents throws on anything that isn't a plain "123" or "123.45" shape -
+  // caught here rather than pre-filtering every keystroke, so a
+  // momentarily malformed value (e.g. mid-edit "1.") just reads as "not
+  // valid yet" instead of fighting the user's typing.
+  let limitPriceCents: Cents | null = null;
+  if (limitPriceInput.trim().length > 0) {
+    try {
+      limitPriceCents = toCents(limitPriceInput.trim());
+    } catch {
+      limitPriceCents = null;
+    }
+  }
+  const isValidLimitPrice = limitPriceCents !== null && limitPriceCents > 0n;
 
   // Live quote refetch, debounced, keyed off a request id so a slow
   // response for a symbol the user already changed away from can never
@@ -100,21 +122,54 @@ export function OrderTicket({
       ? multiply(side === "buy" ? quote.askCents : quote.bidCents, quantity)
       : null;
 
-  const disabledReason = !marketStatus.open
-    ? closedMessage(marketStatus)
-    : symbolInput.length === 0
-      ? "Enter a symbol."
-      : !isValidSymbol
-        ? "Symbol must be 1-5 letters."
-        : quoteStatus === "loading"
-          ? "Fetching a price…"
-          : quoteStatus === "unavailable"
-            ? "No price available for this symbol right now."
-            : quantityInput.length === 0
-              ? "Enter a quantity."
-              : !isValidQuantity
-                ? "Quantity must be a whole number greater than zero."
-                : null;
+  // A limit order's own bound - quantity times its own limit price, not
+  // the current quote - since that's what estimatedAmountCents means for
+  // this order type (see limitOrderAmountLabel). Also what's shown as
+  // "needed" if the order gets rejected for insufficient funds/shares.
+  const limitBoundCents =
+    limitPriceCents !== null && isValidQuantity ? multiply(limitPriceCents, quantity) : null;
+
+  // Informational only - does not disable submission. A wide spread is
+  // still a real quote (unlike the zero-priced-side case, which
+  // getQuoteForSymbol already turns into "unavailable"), and the actual
+  // fill price is re-fetched at submit time regardless, so this is a
+  // heads-up on the estimate shown, not a claim the order would be unsafe.
+  // Only shown for a market order - a limit order's whole point is to
+  // ignore the current spread and wait for its own price, so a caveat
+  // about the CURRENT spread being wide has nothing to say about it.
+  const wideSpreadWarning =
+    orderType === "market" && quote && isSpreadImplausiblyWide(quote.bidCents, quote.askCents)
+      ? describeWideSpreadWarning(symbol)
+      : null;
+
+  // A limit order never needs the market to be open or a live quote to be
+  // ACCEPTED - see lib/trading/limit-reservation.ts's own note on why
+  // canPlaceLimitOrder checks neither. It still needs a valid symbol,
+  // quantity, and limit price, same as a market order needs a valid
+  // symbol and quantity.
+  const disabledReason =
+    orderType === "market" ? getMarketOrderDisabledReason() : getLimitOrderDisabledReason();
+
+  function getMarketOrderDisabledReason(): string | null {
+    if (!marketStatus.open) return closedMessage(marketStatus);
+    if (symbolInput.length === 0) return "Enter a symbol.";
+    if (!isValidSymbol) return "Symbol must be 1-5 letters.";
+    if (quoteStatus === "loading") return "Fetching a price…";
+    if (quoteStatus === "unavailable") return "No price available for this symbol right now.";
+    if (quantityInput.length === 0) return "Enter a quantity.";
+    if (!isValidQuantity) return "Quantity must be a whole number greater than zero.";
+    return null;
+  }
+
+  function getLimitOrderDisabledReason(): string | null {
+    if (symbolInput.length === 0) return "Enter a symbol.";
+    if (!isValidSymbol) return "Symbol must be 1-5 letters.";
+    if (quantityInput.length === 0) return "Enter a quantity.";
+    if (!isValidQuantity) return "Quantity must be a whole number greater than zero.";
+    if (limitPriceInput.length === 0) return "Enter a limit price.";
+    if (!isValidLimitPrice) return "Limit price must be a dollar amount greater than zero.";
+    return null;
+  }
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -122,6 +177,11 @@ export function OrderTicket({
 
     startSubmit(async () => {
       try {
+        if (orderType === "limit") {
+          await submitLimitOrder();
+          return;
+        }
+
         const result = await placeTrade({ symbol, side, quantity });
         if (result.ok) {
           setOutcome({
@@ -153,6 +213,53 @@ export function OrderTicket({
     });
   }
 
+  // Calls the Route Handler directly via fetch, not a Server Action - see
+  // app/api/orders/limit/route.ts's own comment on why this exists as a
+  // Route Handler in the first place. Any thrown error (a network failure,
+  // a malformed response) propagates up to handleSubmit's own try/catch,
+  // which is what sets outcome to "error" - this function only handles
+  // the well-formed ok:true/ok:false response shape.
+  async function submitLimitOrder(): Promise<void> {
+    if (limitPriceCents === null) return; // disabledReason already guards this; narrows for TS.
+    const submittedLimitPriceCents = limitPriceCents;
+
+    const response = await fetch("/api/orders/limit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol,
+        side,
+        quantity,
+        limitPriceCents: submittedLimitPriceCents.toString(),
+      }),
+    });
+    const body: { ok: true; orderId: string } | { ok: false; reason: RejectReason } =
+      await response.json();
+
+    if (body.ok) {
+      setOutcome({
+        kind: "limit_pending",
+        limitPriceCents: submittedLimitPriceCents,
+        quantity,
+        symbol,
+        side,
+      });
+      if (!fixedSymbol) {
+        setSymbolInput("");
+      }
+      setQuantityInput("");
+      setLimitPriceInput("");
+      // Unlike placeTrade's Server Action, a plain fetch to a Route
+      // Handler has no automatic client Router Cache invalidation tied to
+      // it - the route's own revalidatePath call only marks the
+      // server-side cache stale. This is what actually makes the
+      // dashboard/stock page's pending-orders panel show the new order.
+      router.refresh();
+    } else {
+      setOutcome({ kind: "rejected", reason: body.reason });
+    }
+  }
+
   return (
     <section className="border-default bg-panel rounded-lg border">
       <header className="border-default flex items-center justify-between border-b px-4 py-2.5">
@@ -181,6 +288,31 @@ export function OrderTicket({
             }
           >
             Sell
+          </button>
+        </div>
+
+        <div className="border-default bg-elevated flex rounded-md border p-0.5">
+          <button
+            type="button"
+            onClick={() => setOrderType("market")}
+            className={
+              orderType === "market"
+                ? "bg-selected text-fg flex-1 rounded py-1.5 text-sm font-medium"
+                : "text-muted hover:text-fg flex-1 rounded py-1.5 text-sm"
+            }
+          >
+            Market
+          </button>
+          <button
+            type="button"
+            onClick={() => setOrderType("limit")}
+            className={
+              orderType === "limit"
+                ? "bg-selected text-fg flex-1 rounded py-1.5 text-sm font-medium"
+                : "text-muted hover:text-fg flex-1 rounded py-1.5 text-sm"
+            }
+          >
+            Limit
           </button>
         </div>
 
@@ -221,16 +353,45 @@ export function OrderTicket({
           )}
         </label>
 
+        {orderType === "limit" && (
+          <label className="flex flex-col gap-1">
+            <span className="text-muted text-xs">Limit price</span>
+            <input
+              value={limitPriceInput}
+              onChange={(event) => setLimitPriceInput(event.target.value.replace(/[^0-9.]/g, ""))}
+              inputMode="decimal"
+              placeholder="0.00"
+              className={inputClassName}
+            />
+          </label>
+        )}
+
         <div className="flex items-center justify-between py-2">
-          <span className="text-muted text-xs">{estimatedAmountLabel(side)}</span>
+          <span className="text-muted text-xs">
+            {orderType === "market" ? estimatedAmountLabel(side) : limitOrderAmountLabel(side)}
+          </span>
           <span className="text-fg font-mono text-sm tabular-nums">
-            {estimatedAmountCents !== null ? `$${formatCents(estimatedAmountCents)}` : "—"}
+            {orderType === "market"
+              ? estimatedAmountCents !== null
+                ? `$${formatCents(estimatedAmountCents)}`
+                : "—"
+              : limitBoundCents !== null
+                ? `$${formatCents(limitBoundCents)}`
+                : "—"}
           </span>
         </div>
-        <p className="text-subtle text-xs leading-snug">
-          Estimate only - the actual fill price is determined when the order executes and can
-          differ.
-        </p>
+        {wideSpreadWarning && <p className="text-warn text-xs leading-snug">{wideSpreadWarning}</p>}
+        {orderType === "market" ? (
+          <p className="text-subtle text-xs leading-snug">
+            Estimate only - the actual fill price is determined when the order executes and can
+            differ.
+          </p>
+        ) : (
+          <p className="text-subtle text-xs leading-snug">
+            Rests until {side === "buy" ? "the ask falls to" : "the bid rises to"} your limit price
+            or better, or expires at the end of the trading day if it never fills.
+          </p>
+        )}
 
         {outcome?.kind === "rejected" && (
           <div
@@ -240,7 +401,7 @@ export function OrderTicket({
             {describeRejection(outcome.reason, {
               symbol,
               heldQuantity,
-              neededCents: estimatedAmountCents,
+              neededCents: orderType === "market" ? estimatedAmountCents : limitBoundCents,
               availableCents: cashCents,
               marketStatus,
             })}
@@ -259,6 +420,13 @@ export function OrderTicket({
             {outcome.side === "buy" ? "Bought" : "Sold"} {outcome.quantity}{" "}
             {outcome.quantity === 1 ? "share" : "shares"} of {outcome.symbol} at $
             {formatCents(outcome.fillPriceCents)}.
+          </div>
+        )}
+        {outcome?.kind === "limit_pending" && (
+          <div className="border-default bg-elevated text-fg rounded-md border px-3 py-2 text-xs">
+            {outcome.side === "buy" ? "Buy" : "Sell"} order for {outcome.quantity}{" "}
+            {outcome.quantity === 1 ? "share" : "shares"} of {outcome.symbol} at $
+            {formatCents(outcome.limitPriceCents)} is now pending.
           </div>
         )}
 

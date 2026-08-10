@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toCents } from "../trading/money";
-import { currentBarStart, fetchBars, fetchQuotes } from "./alpaca";
+import {
+  currentBarStart,
+  fetchBars,
+  fetchQuote,
+  fetchQuotes,
+  NoTwoSidedQuoteError,
+} from "./alpaca";
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return {
@@ -111,6 +117,136 @@ describe("fetchQuotes", () => {
     delete process.env.ALPACA_KEY_ID;
 
     await expect(fetchQuotes(["AAPL"])).rejects.toThrow(/Missing ALPACA_KEY_ID/);
+  });
+
+  // The real bug this guards against: Bid $295.94, Ask $0.00, Spread
+  // -$295.94 rendered for real, while the market was closed. Alpaca
+  // reports 0 for a side with no active quotation, not a missing field -
+  // so a naive "is the key present" check lets it through as if it were a
+  // real price.
+  it("treats a quote with a zero ask as no quote at all, not a real $0.00 price", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        quotes: {
+          AAPL: { t: "2026-08-05T14:00:00Z", bp: 295.94, ap: 0 },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchQuotes(["AAPL"]);
+
+    expect(result.quotes.has("AAPL")).toBe(false);
+    expect(result.failedSymbols).toEqual(["AAPL"]);
+  });
+
+  it("treats a quote with a zero bid the same way", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        quotes: {
+          AAPL: { t: "2026-08-05T14:00:00Z", bp: 0, ap: 100 },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchQuotes(["AAPL"]);
+
+    expect(result.quotes.has("AAPL")).toBe(false);
+    expect(result.failedSymbols).toEqual(["AAPL"]);
+  });
+
+  it("keeps other symbols intact when only one has a zero-priced side", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        quotes: {
+          AAPL: { t: "2026-08-05T14:00:00Z", bp: 295.94, ap: 0 },
+          TSLA: { t: "2026-08-05T14:00:00Z", bp: 199, ap: 200 },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchQuotes(["AAPL", "TSLA"]);
+
+    expect(result.quotes.has("AAPL")).toBe(false);
+    expect(result.quotes.get("TSLA")).toMatchObject({ bidCents: toCents("199.00") });
+    expect(result.failedSymbols).toEqual(["AAPL"]);
+  });
+
+  // The exact real batch this bug was found from - pulled directly from
+  // Alpaca's own multi-symbol endpoint for six liquid symbols in one
+  // request, all timestamped within ~35 seconds of a real 4pm ET close.
+  // Two (NVDA, TSLA) came back with a real but implausibly wide spread;
+  // four (AAPL, MSFT, AMZN, SPY) came back with the ask side fully zeroed
+  // out. A real production request would have looked exactly like this.
+  it("handles the real six-symbol closing-print batch: two wide-but-valid, four zeroed-ask", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        quotes: {
+          NVDA: { t: "2026-08-07T20:00:01Z", bp: 210.44, ap: 232.74 },
+          TSLA: { t: "2026-08-07T20:00:00Z", bp: 312.71, ap: 345.07 },
+          AAPL: { t: "2026-08-07T20:00:01Z", bp: 295.94, ap: 0 },
+          MSFT: { t: "2026-08-07T20:00:05Z", bp: 474.07, ap: 0 },
+          AMZN: { t: "2026-08-07T20:00:02Z", bp: 259.11, ap: 0 },
+          SPY: { t: "2026-08-07T20:00:36Z", bp: 771.64, ap: 0 },
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchQuotes(["NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "SPY"]);
+
+    expect(result.quotes.get("NVDA")).toMatchObject({
+      bidCents: toCents("210.44"),
+      askCents: toCents("232.74"),
+    });
+    expect(result.quotes.get("TSLA")).toMatchObject({
+      bidCents: toCents("312.71"),
+      askCents: toCents("345.07"),
+    });
+    expect(result.failedSymbols.sort()).toEqual(["AAPL", "AMZN", "MSFT", "SPY"]);
+  });
+});
+
+describe("fetchQuote", () => {
+  it("returns bid and ask for a valid two-sided quote", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        symbol: "AAPL",
+        quote: { t: "2026-08-05T14:00:00Z", bp: 99, ap: 100 },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const quote = await fetchQuote("AAPL");
+
+    expect(quote.bidCents).toBe(toCents("99.00"));
+    expect(quote.askCents).toBe(toCents("100.00"));
+  });
+
+  it("throws NoTwoSidedQuoteError, not a quote with a $0.00 side, when the ask is zero", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        symbol: "AAPL",
+        quote: { t: "2026-08-05T14:00:00Z", bp: 295.94, ap: 0 },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(fetchQuote("AAPL")).rejects.toBeInstanceOf(NoTwoSidedQuoteError);
+  });
+
+  it("throws NoTwoSidedQuoteError when the bid is zero", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        symbol: "AAPL",
+        quote: { t: "2026-08-05T14:00:00Z", bp: 0, ap: 100 },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(fetchQuote("AAPL")).rejects.toBeInstanceOf(NoTwoSidedQuoteError);
   });
 });
 
