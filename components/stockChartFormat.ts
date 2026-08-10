@@ -83,6 +83,33 @@ export function findBarIndexAtOrBefore(barTimestamps: readonly string[], instant
   return lastIndexAtOrBefore;
 }
 
+// Turns a parallel array of indicator values (one per bar, `null` wherever
+// there isn't enough preceding data - see lib/trading/indicators.ts) into
+// the line-series points lightweight-charts actually gets fed. This is the
+// one piece of the chart integration that's genuinely worth its own unit
+// test: the indicator math itself is already tested in isolation, and the
+// chart-rendering side can't be (no DOM in this project's test
+// environment), so this is the one place a "computed correctly but never
+// actually reaches the chart" gap could hide undetected - e.g. a
+// too-short valid run (a real case: SMA(20) over a ~22-bar 1M/1D window
+// has only a few non-null points) silently producing an empty series
+// instead of the few real points, or `null` slipping through as a plotted
+// zero.
+export function buildLineSeriesData(
+  bars: readonly { timestamp: string }[],
+  values: readonly (number | null)[],
+  timeframe: BarTimeframe,
+): { time: Time; value: number }[] {
+  const points: { time: Time; value: number }[] = [];
+  for (let i = 0; i < bars.length; i++) {
+    const value = values[i];
+    if (value !== null && value !== undefined) {
+      points.push({ time: barChartTime(bars[i]!.timestamp, timeframe), value });
+    }
+  }
+  return points;
+}
+
 // True when a bar's own close is at or above its own open - used to color
 // both the candle and its volume bar the same direction. Compared as
 // BigInt, not string >=: "10050" >= "9999" is false lexicographically (a

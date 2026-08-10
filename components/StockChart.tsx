@@ -26,6 +26,7 @@ import {
 import { DEFAULT_RSI_PERIOD, ema, rsi, sma } from "@/lib/trading/indicators";
 import {
   barChartTime,
+  buildLineSeriesData,
   centsToDollars,
   findBarIndexAtOrBefore,
   formatDollars,
@@ -110,6 +111,13 @@ type IndicatorToggleProps = {
 // One toggle + period pair, shared markup for SMA/EMA/RSI - a restrained
 // toggle list, not a trading terminal's full indicator dialog (no style
 // pickers, no per-indicator color choice, no add/remove list).
+//
+// The toggle always carries a visible border and an explicit filled/empty
+// dot, in both states - not just muted text that happens to be clickable.
+// A control that looks identical to a static label when off isn't
+// discoverable as a toggle at all, which is exactly the gap a real user
+// hit: the period input next to it looks like "the" control, and there was
+// nothing about the off-state button to suggest it does anything.
 function IndicatorToggle({
   label,
   enabled,
@@ -123,12 +131,14 @@ function IndicatorToggle({
       <button
         type="button"
         onClick={onToggle}
+        aria-pressed={enabled}
         className={
           enabled
-            ? `bg-selected rounded px-2 py-1 text-xs font-medium ${activeColorClassName}`
-            : "text-muted hover:text-fg rounded px-2 py-1 text-xs transition-colors"
+            ? `border-strong bg-selected flex items-center gap-1 rounded border px-2 py-1 text-xs font-medium ${activeColorClassName}`
+            : "border-default text-muted hover:text-fg hover:border-strong flex items-center gap-1 rounded border px-2 py-1 text-xs transition-colors"
         }
       >
+        <span aria-hidden>{enabled ? "●" : "○"}</span>
         {label}
       </button>
       <input
@@ -231,17 +241,27 @@ export function StockChart({
     const smaColor = readThemeColor("--color-chart-line-1");
     const emaColor = readThemeColor("--color-chart-line-2");
 
-    // The pane is vertically split by named price scales confined via
-    // scaleMargins (the same overlay technique volume already uses, not
-    // lightweight-charts' newer separate-pane API - see the volume series
-    // below). RSI needs its own 0-100 scale, so enabling it re-partitions
-    // the split three ways instead of two.
-    const priceScaleMargins = rsiEnabled ? { top: 0.05, bottom: 0.4 } : { top: 0.1, bottom: 0.3 };
-    const volumeScaleMargins = rsiEnabled ? { top: 0.6, bottom: 0.25 } : { top: 0.75, bottom: 0 };
+    // Volume and RSI each get a genuinely separate pane (lightweight-charts'
+    // own multi-pane support), not a second/third named price scale
+    // squeezed into the same pane via scaleMargins - that overlay approach
+    // was this component's first attempt, and a real screenshot showed why
+    // it doesn't hold up: the volume series' own last-value label rendered
+    // inside the price pane's own value band instead of staying confined to
+    // volume's intended sliver, because a hidden (`visible: false`) price
+    // scale's last-value badge doesn't respect the same scaleMargins
+    // confinement its histogram bars do. Separate panes have no such shared-
+    // coordinate-space subtlety: each pane is its own independent value
+    // axis, which is what real chart panes are for. Panes share the same
+    // time axis automatically, so the crosshair/timeScale code below needs
+    // no changes for this.
+    const priceHeight = 260;
+    const volumeHeight = 80;
+    const rsiHeight = 90;
+    const totalHeight = priceHeight + volumeHeight + (rsiEnabled ? rsiHeight : 0);
 
     const chart = createChart(container, {
       width: container.clientWidth,
-      height: CHART_HEIGHT,
+      height: totalHeight,
       layout: { background: { color: "transparent" }, textColor: muted },
       grid: {
         vertLines: { color: gridLine },
@@ -250,8 +270,7 @@ export function StockChart({
       timeScale: { borderColor: gridLine },
       rightPriceScale: {
         borderColor: gridLine,
-        scaleMargins: priceScaleMargins,
-        // Log scale applies only to the main price scale, never to volume
+        // Log scale applies only to the main price pane, never to volume
         // or RSI - both are already bounded/normalized (volume by its own
         // "volume" price format, RSI by its fixed 0-100 range), so a log
         // transform has no meaningful effect on either and would only
@@ -280,19 +299,11 @@ export function StockChart({
       })),
     );
 
-    // Volume as an overlay on the same pane, not lightweight-charts' newer
-    // separate-pane API - this is the long-established, extensively
-    // documented pattern (a dedicated price scale confined to the bottom of
-    // the pane via scaleMargins) and the safer choice to get right without
-    // a browser available to visually confirm a newer API's behavior.
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: "volume" },
-      priceScaleId: "volume",
-    });
-    chart.priceScale("volume").applyOptions({
-      scaleMargins: volumeScaleMargins,
-      visible: false,
-    });
+    // Pane 1 - its own independent value axis, not a second price scale
+    // sharing pane 0's coordinate space (see the note above createChart).
+    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" } }, 1);
+    chart.panes()[1]?.setHeight(volumeHeight);
+    chart.priceScale("right", 1).applyOptions({ borderColor: gridLine });
 
     const upVolumeColor = withAlpha(gain, "80");
     const downVolumeColor = withAlpha(loss, "80");
@@ -334,15 +345,17 @@ export function StockChart({
         priceLineVisible: false,
         lastValueVisible: false,
       });
-      // Points with no value yet (the first `period - 1` bars) are omitted
-      // entirely rather than plotted as 0 - the line simply starts once
-      // there's enough data, same "null means unknown" convention the
-      // indicator functions themselves use.
+      // buildLineSeriesData (tested in stockChartFormat.test.ts, including
+      // this exact shape of case - a short valid run over a long bar array)
+      // is what actually reaches lightweight-charts here, not a parallel
+      // inline copy of the same logic. Points with no value yet are
+      // omitted entirely, not plotted as 0 - the line starts once there's
+      // enough data, same "null means unknown" convention indicators.ts uses.
       smaSeries.setData(
-        bars
-          .map((bar, i) => ({ time: barChartTime(bar.timestamp, timeframe), value: smaValues[i] }))
-          .filter((point): point is { time: Time; value: number } => point.value !== null)
-          .map((point) => ({ time: point.time, value: point.value / 100 })),
+        buildLineSeriesData(bars, smaValues, timeframe).map((point) => ({
+          time: point.time,
+          value: point.value / 100,
+        })),
       );
     }
 
@@ -354,38 +367,39 @@ export function StockChart({
         lastValueVisible: false,
       });
       emaSeries.setData(
-        bars
-          .map((bar, i) => ({ time: barChartTime(bar.timestamp, timeframe), value: emaValues[i] }))
-          .filter((point): point is { time: Time; value: number } => point.value !== null)
-          .map((point) => ({ time: point.time, value: point.value / 100 })),
+        buildLineSeriesData(bars, emaValues, timeframe).map((point) => ({
+          time: point.time,
+          value: point.value / 100,
+        })),
       );
     }
 
     if (rsiValues) {
-      const rsiSeries = chart.addSeries(LineSeries, {
-        color: fg,
-        lineWidth: 1,
-        priceScaleId: "rsi",
-        priceLineVisible: false,
-        lastValueVisible: false,
-        // RSI's own scale is fixed 0-100, not auto-fit to the visible
-        // data's range - a flat run near 50 shouldn't zoom in and look
-        // like it's swinging wildly between two nearly-identical values.
-        // This is a series option, not a price-scale option, despite
-        // configuring the scale's own behavior.
-        autoscaleInfoProvider: () => ({
-          priceRange: { minValue: 0, maxValue: 100 },
-        }),
-      });
-      chart.priceScale("rsi").applyOptions({
-        scaleMargins: { top: 0.78, bottom: 0 },
-        visible: false,
-      });
-      rsiSeries.setData(
-        bars
-          .map((bar, i) => ({ time: barChartTime(bar.timestamp, timeframe), value: rsiValues[i] }))
-          .filter((point): point is { time: Time; value: number } => point.value !== null),
+      // Pane 2 - its own independent value axis, same reasoning as volume's
+      // pane 1 above. Only created when RSI is actually enabled, which is
+      // why totalHeight above only reserves space for it conditionally.
+      const rsiSeries = chart.addSeries(
+        LineSeries,
+        {
+          color: fg,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          // RSI's own scale is fixed 0-100, not auto-fit to the visible
+          // data's range - a flat run near 50 shouldn't zoom in and look
+          // like it's swinging wildly between two nearly-identical values.
+          // This is a series option, not a price-scale option, despite
+          // configuring the scale's own behavior.
+          autoscaleInfoProvider: () => ({
+            priceRange: { minValue: 0, maxValue: 100 },
+          }),
+        },
+        2,
       );
+      chart.panes()[2]?.setHeight(rsiHeight);
+      chart.priceScale("right", 2).applyOptions({ borderColor: gridLine });
+      // RSI is already 0-100, no /100 conversion needed - unlike SMA/EMA above.
+      rsiSeries.setData(buildLineSeriesData(bars, rsiValues, timeframe));
       // Conventional overbought/oversold reference lines, not interactive -
       // kept to two thin dashed lines, not shaded zones, per "keep the UI
       // restrained."

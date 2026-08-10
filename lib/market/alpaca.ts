@@ -312,10 +312,22 @@ export async function fetchBars(
   const formingBarStart = currentBarStart(timeframe, now);
   const start = new Date(now.getTime() - lookbackMs);
 
+  // Alpaca's `start`/`end` bars-endpoint bounds are both inclusive -
+  // confirmed empirically: querying end=T and, separately, start=T for the
+  // same symbol/timeframe both return the bar whose own timestamp is
+  // exactly T. Without this, the completed query (end=formingBarStart) and
+  // the forming query (start=formingBarStart) would both return the exact
+  // bar at that boundary whenever one exists there, duplicating it in the
+  // merged result below - the real bug behind two candles sharing an x
+  // position. Subtracting 1ms for the completed query's end is what keeps
+  // the boundary bar exclusively in the forming half, where it belongs (by
+  // definition, it's the bar still forming as of `now`).
+  const completedRangeEnd = new Date(formingBarStart.getTime() - 1);
+
   try {
     let completedBars: z.infer<typeof AlpacaBarSchema>[] = [];
-    if (start < formingBarStart) {
-      const completedResponse = await fetch(barsUrl(symbol, timeframe, start, formingBarStart), {
+    if (start < completedRangeEnd) {
+      const completedResponse = await fetch(barsUrl(symbol, timeframe, start, completedRangeEnd), {
         headers,
         cache: "force-cache",
       });
@@ -335,10 +347,28 @@ export async function fetchBars(
       formingBars = AlpacaBarsResponseSchema.parse(body).bars ?? [];
     }
 
-    return [...completedBars, ...formingBars].map(toBar);
+    return dedupeBarsByTimestamp([...completedBars, ...formingBars]).map(toBar);
   } catch {
     return [];
   }
+}
+
+// Belt-and-suspenders, not the primary fix: the completed/forming query
+// ranges above are constructed to never share a boundary instant in the
+// first place, so this should never actually find anything to remove.
+// Kept anyway as a second line of defense against the exact failure mode
+// this was written to fix (two bars rendering at the same x position) -
+// keeps the LAST occurrence of any timestamp, which is always the forming
+// half's version when both halves somehow return the same instant, since
+// forming data is the more current of the two.
+function dedupeBarsByTimestamp(
+  bars: z.infer<typeof AlpacaBarSchema>[],
+): z.infer<typeof AlpacaBarSchema>[] {
+  const byTimestamp = new Map<string, z.infer<typeof AlpacaBarSchema>>();
+  for (const bar of bars) {
+    byTimestamp.set(bar.t, bar);
+  }
+  return [...byTimestamp.values()];
 }
 
 // A symbol with no data in range is omitted from `bars` entirely (not
