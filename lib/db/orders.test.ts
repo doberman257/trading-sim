@@ -7,7 +7,7 @@ import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
 import { db, poolMax } from "./client";
-import { placeMarketOrder } from "./orders";
+import { getFilledOrdersForSymbol, placeMarketOrder } from "./orders";
 import { accounts, orders, positions, transactions } from "./schema";
 import { assertLedgerBalances } from "./test-helpers";
 
@@ -294,5 +294,45 @@ describe("placeMarketOrder", () => {
     } finally {
       await rawSql.end();
     }
+  });
+});
+
+describe("getFilledOrdersForSymbol", () => {
+  it("returns only filled orders for that symbol, oldest first", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    mockQuote({ symbol: "AAPL", askCents: toCents("100.00"), bidCents: toCents("99.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 10 });
+
+    mockQuote({ symbol: "AAPL", askCents: toCents("110.00"), bidCents: toCents("108.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "sell", quantity: 4 });
+
+    // A different symbol and a rejected order - neither should come back.
+    mockQuote({ symbol: "TSLA", askCents: toCents("200.00"), bidCents: toCents("199.00") });
+    await placeMarketOrder({ userId, symbol: "TSLA", side: "buy", quantity: 1 });
+    mockQuote({ symbol: "AAPL", askCents: toCents("1000000.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 1 });
+
+    const fills = await getFilledOrdersForSymbol(account.id, "AAPL");
+
+    expect(fills).toHaveLength(2);
+    expect(fills[0]).toMatchObject({
+      side: "buy",
+      quantity: 10,
+      filledPriceCents: toCents("100.00"),
+    });
+    expect(fills[1]).toMatchObject({
+      side: "sell",
+      quantity: 4,
+      filledPriceCents: toCents("108.00"),
+    });
+    expect(fills[0]?.filledAt.getTime()).toBeLessThanOrEqual(fills[1]?.filledAt.getTime() ?? 0);
+  });
+
+  it("returns an empty list for a symbol with no fills", async () => {
+    const account = await getOrCreateAccount(randomUUID());
+
+    expect(await getFilledOrdersForSymbol(account.id, "AAPL")).toEqual([]);
   });
 });

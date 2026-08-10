@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Sparkline } from "./Sparkline";
 import { WatchlistStar } from "./WatchlistStar";
 import { formatCents } from "@/lib/trading/money";
 
@@ -7,9 +8,17 @@ export type WatchlistRowProps = {
   name: string;
   bidCents: bigint | null;
   askCents: bigint | null;
+  /** Daily closes, oldest first, for the trend sparkline. Empty when unavailable. */
+  sparklineCloses: readonly bigint[];
 };
 
-export function WatchlistRow({ symbol, name, bidCents, askCents }: WatchlistRowProps) {
+export function WatchlistRow({
+  symbol,
+  name,
+  bidCents,
+  askCents,
+  sparklineCloses,
+}: WatchlistRowProps) {
   const priceUnavailable = bidCents === null || askCents === null;
 
   return (
@@ -36,6 +45,9 @@ export function WatchlistRow({ symbol, name, bidCents, askCents }: WatchlistRowP
         ) : (
           <span className="text-fg">${formatCents(askCents)}</span>
         )}
+      </td>
+      <td className="px-3 py-2.5">
+        <Sparkline closesCents={sparklineCloses} />
       </td>
     </tr>
   );

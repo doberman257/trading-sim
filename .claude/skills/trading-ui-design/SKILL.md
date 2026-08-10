@@ -48,6 +48,10 @@ Tailwind values in components; only the semantic name.
   --color-loss: #dc5454; /* desaturated from Tailwind red-500; see note below */
   --color-warn: #eab308; /* stale data, closed market */
   --color-accent: #60a5fa; /* focus rings, links */
+
+  /* Chart overlay lines only (SMA/EMA) — not a general categorical palette */
+  --color-chart-line-1: #a78bfa; /* SMA overlay */
+  --color-chart-line-2: #f472b6; /* EMA overlay */
 }
 ```
 
@@ -81,6 +85,18 @@ faster than they lose "loudness."
 use green for "success" or red for "error" in this app — a red toast next to a
 red P&L figure is genuinely confusing. Use `--fg` and `--warn` for system
 states.
+
+**When a new token is warranted vs. reusing an existing one's opacity
+scale:** depends on whether the need is bounded. `--color-chart-line-1`/`-2`
+(SMA/EMA overlays) are dedicated tokens because a price chart only ever
+overlays a small, fixed number of named lines — a real, bounded need.
+`PortfolioAllocation`'s per-position slices reuse `--color-accent` at
+decreasing opacity instead, because that count is unbounded (one per
+position) and a fixed set of hues can't cover it cleanly. Don't reach for a
+new token to solve an unbounded-cardinality problem, and don't stretch an
+existing token's opacity scale to cover a second, unrelated fixed meaning
+(`--color-accent` was already claimed by the avg-cost line and the watchlist
+star before the chart overlays needed their own tokens).
 
 ---
 

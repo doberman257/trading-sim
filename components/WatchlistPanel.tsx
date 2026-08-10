@@ -43,6 +43,12 @@ export function WatchlistPanel({ items }: WatchlistPanelProps) {
               >
                 Ask
               </th>
+              <th
+                scope="col"
+                className="text-muted px-3 py-2 text-left text-xs font-normal tracking-wide uppercase"
+              >
+                30d trend
+              </th>
             </tr>
           </thead>
           <tbody>
