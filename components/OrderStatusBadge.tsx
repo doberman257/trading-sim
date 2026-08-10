@@ -5,6 +5,10 @@ const STATUS_DISPLAY: Record<OrderStatus, { label: string; glyph: string; classN
   rejected: { label: "Rejected", glyph: "✕", className: "text-loss" },
   cancelled: { label: "Cancelled", glyph: "○", className: "text-muted" },
   pending: { label: "Pending", glyph: "◷", className: "text-warn" },
+  // A limit order the worker swept at market close, still unfilled - day
+  // orders only. Distinct glyph/muted color from "cancelled": this wasn't
+  // a user action, it just ran out of trading day.
+  expired: { label: "Expired", glyph: "◌", className: "text-muted" },
 };
 
 export type OrderStatusBadgeProps = {

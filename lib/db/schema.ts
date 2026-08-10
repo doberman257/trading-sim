@@ -18,9 +18,24 @@ export const orderStatusEnum = pgEnum("order_status", [
   "filled",
   "cancelled",
   "rejected",
+  // A pending limit order the worker swept because the market closed while
+  // it was still unfilled - day orders only, see limitOrderWorkerRuns and
+  // app/api/worker/limit-orders/route.ts. Distinct from "cancelled" (a user
+  // action) and "rejected" (never accepted in the first place) - this is a
+  // resting order that WAS accepted and simply ran out of trading day.
+  "expired",
 ]);
 export const transactionKindEnum = pgEnum("transaction_kind", ["deposit", "buy", "sell"]);
 export const assetSyncStatusEnum = pgEnum("asset_sync_status", ["running", "succeeded", "failed"]);
+// Same three-state shape as assetSyncStatusEnum (running while in flight,
+// then succeeded or failed) but kept as its own named Postgres type rather
+// than reused, matching how every other append-only run log in this schema
+// gets its own enum even when the values happen to overlap.
+export const limitOrderWorkerRunStatusEnum = pgEnum("limit_order_worker_run_status", [
+  "running",
+  "succeeded",
+  "failed",
+]);
 
 export const accounts = pgTable("accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -114,6 +129,27 @@ export const assetSyncRuns = pgTable("asset_sync_runs", {
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   status: assetSyncStatusEnum("status").notNull().default("running"),
   assetCount: integer("asset_count"),
+  errorMessage: text("error_message"),
+});
+
+// Same append-only run-log shape as assetSyncRuns, for the same reason: a
+// single mutable "last run at" column can't tell "hasn't run in 20 minutes
+// because nothing's scheduled it" apart from "has been failing every
+// invocation for 20 minutes" - very different problems for the
+// observability route (see app/api/worker/status/route.ts) to distinguish.
+// marketWasOpen records which branch of the worker ran (the fill-checking
+// branch vs. the closed-market expire-sweep) - the two do very different
+// work, and a run's own counts only make sense read alongside which one it
+// was.
+export const limitOrderWorkerRuns = pgTable("limit_order_worker_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  status: limitOrderWorkerRunStatusEnum("status").notNull().default("running"),
+  marketWasOpen: boolean("market_was_open"),
+  ordersEvaluated: integer("orders_evaluated"),
+  ordersFilled: integer("orders_filled"),
+  ordersExpired: integer("orders_expired"),
   errorMessage: text("error_message"),
 });
 

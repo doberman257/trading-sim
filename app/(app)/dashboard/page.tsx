@@ -1,17 +1,21 @@
 import { redirect } from "next/navigation";
 import { MarketStatusBanner } from "@/components/MarketStatusBanner";
 import { OrderTicket } from "@/components/OrderTicket";
+import { PendingOrdersPanel } from "@/components/PendingOrdersPanel";
 import { PortfolioAllocation } from "@/components/PortfolioAllocation";
 import { PositionsPanel } from "@/components/PositionsPanel";
 import { RecentOrdersPanel } from "@/components/RecentOrdersPanel";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { getOrCreateAccount } from "@/lib/db/accounts";
+import { getLastLimitOrderWorkerRun } from "@/lib/db/limit-order-worker";
+import { getPendingOrdersForAccount } from "@/lib/db/orders";
 import { getPortfolio } from "@/lib/db/portfolio";
 import { fetchDailyBarsForSymbols, fetchQuotes } from "@/lib/market/alpaca";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { calculateAllocation } from "@/lib/trading/allocation";
 import { getMarketStatus } from "@/lib/trading/market-hours";
 import { calculatePortfolio } from "@/lib/trading/portfolio";
+import { isWorkerRunStale } from "@/lib/trading/worker-staleness";
 
 // This page reads the user's session via cookies() (inside
 // createSupabaseServerClient), which already forces dynamic rendering on
@@ -40,9 +44,15 @@ export default async function DashboardPage() {
   // so calculatePortfolio below treats them identically to "no quote available".
   // fetchDailyBarsForSymbols batches every held symbol's sparkline data into
   // one request rather than one per position - see lib/market/alpaca.ts.
-  const [{ quotes }, sparklineBars] = await Promise.all([
+  // getPendingOrdersForAccount/getLastLimitOrderWorkerRun feed the pending-
+  // orders panel and its staleness signal below - fetched here, not inside
+  // that Client Component, since this Server Component already loads
+  // everything else the page needs in one place.
+  const [{ quotes }, sparklineBars, pendingOrders, lastWorkerRun] = await Promise.all([
     fetchQuotes(symbols),
     fetchDailyBarsForSymbols(symbols),
+    getPendingOrdersForAccount(account.id),
+    getLastLimitOrderWorkerRun(),
   ]);
   const sparklines = new Map(
     [...sparklineBars.entries()].map(([symbol, bars]) => [
@@ -58,6 +68,13 @@ export default async function DashboardPage() {
     portfolio.cashCents,
     valuation.totalEquityCents,
   );
+
+  // Never let a user believe a pending order is being actively watched if
+  // it might not be - see lib/trading/worker-staleness.ts. "Never run at
+  // all" counts as stale, the same as a run that happened too long ago.
+  const workerStale =
+    !lastWorkerRun ||
+    isWorkerRunStale(Date.now() - lastWorkerRun.startedAt.getTime(), marketStatus.open);
 
   // Prices are only ever live immediately after a fresh fetch while the
   // market is open. There is no quote cache in this app for an individual
@@ -98,6 +115,16 @@ export default async function DashboardPage() {
           />
           <RecentOrdersPanel orders={portfolio.recentOrders} />
         </div>
+        <PendingOrdersPanel
+          orders={pendingOrders.map((order) => ({
+            id: order.id,
+            symbol: order.symbol,
+            side: order.side,
+            quantity: order.quantity,
+            limitPriceCents: order.limitPriceCents.toString(),
+          }))}
+          workerStale={workerStale}
+        />
       </div>
     </main>
   );

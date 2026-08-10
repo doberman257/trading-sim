@@ -7,7 +7,13 @@ import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
 import { db, poolMax } from "./client";
-import { getFilledOrdersForSymbol, placeMarketOrder } from "./orders";
+import {
+  cancelOrder,
+  getFilledOrdersForSymbol,
+  getOrdersForAccount,
+  placeLimitOrder,
+  placeMarketOrder,
+} from "./orders";
 import { accounts, orders, positions, transactions } from "./schema";
 import { assertLedgerBalances } from "./test-helpers";
 
@@ -341,6 +347,261 @@ describe("placeMarketOrder", () => {
   });
 });
 
+describe("placeLimitOrder", () => {
+  it("accepts a valid buy and inserts it as pending, without touching cash", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    const result = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 10,
+      limitPriceCents: toCents("100.00"),
+    });
+
+    expect(result.ok).toBe(true);
+
+    const [updatedAccount] = await db.select().from(accounts).where(eq(accounts.id, account.id));
+    expect(updatedAccount?.cashCents).toBe(account.cashCents);
+
+    const orderRows = await db.select().from(orders).where(eq(orders.accountId, account.id));
+    expect(orderRows).toHaveLength(1);
+    expect(orderRows[0]?.status).toBe("pending");
+    expect(orderRows[0]?.type).toBe("limit");
+    expect(orderRows[0]?.limitPriceCents).toBe(toCents("100.00"));
+
+    await assertLedgerBalances(account.id);
+  });
+
+  it('rejects with "insufficient_funds" and still logs the order when the order alone exceeds cash', async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    const result = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: toCents("1000000.00"),
+    });
+
+    expect(result).toEqual({ ok: false, reason: "insufficient_funds" });
+
+    const orderRows = await db.select().from(orders).where(eq(orders.accountId, account.id));
+    expect(orderRows).toHaveLength(1);
+    expect(orderRows[0]?.status).toBe("rejected");
+    expect(orderRows[0]?.rejectReason).toBe("insufficient_funds");
+  });
+
+  it('rejects with "insufficient_shares" for a sell of a symbol not held', async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+
+    const result = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "sell",
+      quantity: 1,
+      limitPriceCents: toCents("100.00"),
+    });
+
+    expect(result).toEqual({ ok: false, reason: "insufficient_shares" });
+  });
+
+  it('rejects with "invalid_limit_price" for a zero limit price', async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+
+    const result = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: 0n,
+    });
+
+    expect(result).toEqual({ ok: false, reason: "invalid_limit_price" });
+  });
+
+  // The reservation math itself is unit-tested in isolation
+  // (lib/trading/limit-reservation.test.ts) - this proves placeLimitOrder
+  // actually wires that logic up against real, persisted pending orders,
+  // not just that the pure function is correct on its own.
+  it("rejects a second buy once the first's reservation exhausts available cash", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    // $100,000 cash. First order reserves $90,000 (900 * $100).
+    const first = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 900,
+      limitPriceCents: toCents("100.00"),
+    });
+    expect(first.ok).toBe(true);
+
+    // A second order for $20,000 (200 * $100) - only $10,000 remains.
+    const second = await placeLimitOrder({
+      userId,
+      symbol: "TSLA",
+      side: "buy",
+      quantity: 200,
+      limitPriceCents: toCents("100.00"),
+    });
+    expect(second).toEqual({ ok: false, reason: "insufficient_funds" });
+
+    // Cash itself is untouched either way - nothing fills at placement time.
+    const [updatedAccount] = await db.select().from(accounts).where(eq(accounts.id, account.id));
+    expect(updatedAccount?.cashCents).toBe(account.cashCents);
+  });
+});
+
+describe("cancelOrder", () => {
+  it("cancels a real pending order", async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+    const placed = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: toCents("100.00"),
+    });
+    if (!placed.ok) throw new Error("setup failed");
+
+    const result = await cancelOrder(userId, placed.orderId);
+    expect(result).toEqual({ ok: true });
+
+    const [orderRow] = await db.select().from(orders).where(eq(orders.id, placed.orderId));
+    expect(orderRow?.status).toBe("cancelled");
+  });
+
+  it('reports "not_found" for an unknown order id', async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+
+    const result = await cancelOrder(userId, randomUUID());
+    expect(result).toEqual({ ok: false, reason: "not_found" });
+  });
+
+  // Also covers the cross-account case: an order id that's real but
+  // belongs to a different account must look identical to an id that
+  // doesn't exist at all - see cancelOrder's own comment on why.
+  it('reports "not_found" for another account\'s order, not a permission error that would confirm it exists', async () => {
+    const ownerUserId = randomUUID();
+    await getOrCreateAccount(ownerUserId);
+    const placed = await placeLimitOrder({
+      userId: ownerUserId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: toCents("100.00"),
+    });
+    if (!placed.ok) throw new Error("setup failed");
+
+    const attackerUserId = randomUUID();
+    await getOrCreateAccount(attackerUserId);
+
+    const result = await cancelOrder(attackerUserId, placed.orderId);
+    expect(result).toEqual({ ok: false, reason: "not_found" });
+
+    // The real owner's order must be untouched.
+    const [orderRow] = await db.select().from(orders).where(eq(orders.id, placed.orderId));
+    expect(orderRow?.status).toBe("pending");
+  });
+
+  it('reports "not_cancellable" for an order that is already cancelled', async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+    const placed = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: toCents("100.00"),
+    });
+    if (!placed.ok) throw new Error("setup failed");
+
+    await cancelOrder(userId, placed.orderId);
+    const secondAttempt = await cancelOrder(userId, placed.orderId);
+
+    expect(secondAttempt).toEqual({ ok: false, reason: "not_cancellable" });
+  });
+
+  // The exact race this app's design is built to handle correctly: a
+  // cancellation and an in-progress fill both want the same order row's
+  // lock. This holds a real lock on the order (via a second raw
+  // connection, not cancelOrder itself) for a fixed, known duration, then
+  // marks it filled - proving cancelOrder's own SELECT ... FOR UPDATE
+  // genuinely blocks on that lock (timed, not assumed) and, once
+  // unblocked, correctly reports "already_filled" rather than a silent
+  // success or a generic error. Same technique as the deterministic
+  // account-lock test above, applied to the order-row lock instead.
+  it('returns "already_filled", not ok:true or an error, when it loses the row lock to an in-progress fill', async () => {
+    expect(
+      poolMax,
+      `This test needs at least 2 real concurrent DB connections: one to hold the order row's lock ` +
+        `while simulating an in-progress fill, one for cancelOrder's own SELECT ... FOR UPDATE to genuinely ` +
+        `block on. (lib/db/client.ts's poolMax is currently ${poolMax}, from DB_POOL_MAX.) Below 2, ` +
+        `cancelOrder could never actually contend for the lock this test holds, and would trivially "win" ` +
+        `every time regardless of whether the lock is real.`,
+    ).toBeGreaterThanOrEqual(2);
+
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+    const placed = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: toCents("100.00"),
+    });
+    if (!placed.ok) throw new Error("setup failed");
+
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error("Missing TEST_DATABASE_URL");
+    }
+
+    const rawSql = postgres(testDatabaseUrl, { prepare: false });
+
+    try {
+      const start = Date.now();
+      let cancelResolvedAfterMs: number | null = null;
+
+      const simulatedFill = rawSql.begin(async (tx) => {
+        await tx`select * from orders where id = ${placed.orderId} for update`;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await tx`update orders set status = 'filled', filled_price_cents = 10000, filled_at = now() where id = ${placed.orderId}`;
+      });
+
+      // Give the simulated fill a head start so it acquires the lock first.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const cancelPromise = cancelOrder(userId, placed.orderId).then((result) => {
+        cancelResolvedAfterMs = Date.now() - start;
+        return result;
+      });
+
+      const [, cancelResult] = await Promise.all([simulatedFill, cancelPromise]);
+
+      if (cancelResolvedAfterMs === null) {
+        throw new Error("cancelOrder never returned");
+      }
+
+      // Proves cancelOrder genuinely blocked on the held lock rather than
+      // reading a stale/unlocked status - it can't have resolved before
+      // the simulated fill's own 300ms hold released it.
+      expect(cancelResolvedAfterMs).toBeGreaterThanOrEqual(300);
+      expect(cancelResult).toEqual({ ok: false, reason: "already_filled" });
+    } finally {
+      await rawSql.end();
+    }
+  });
+});
+
 describe("getFilledOrdersForSymbol", () => {
   it("returns only filled orders for that symbol, oldest first", async () => {
     const userId = randomUUID();
@@ -378,5 +639,76 @@ describe("getFilledOrdersForSymbol", () => {
     const account = await getOrCreateAccount(randomUUID());
 
     expect(await getFilledOrdersForSymbol(account.id, "AAPL")).toEqual([]);
+  });
+});
+
+describe("getOrdersForAccount", () => {
+  it("returns every order type and status, newest first, with the full shape a read API needs", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    mockQuote({ symbol: "AAPL", askCents: toCents("100.00"), bidCents: toCents("99.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 5 });
+
+    const placedLimit = await placeLimitOrder({
+      userId,
+      symbol: "TSLA",
+      side: "buy",
+      quantity: 2,
+      limitPriceCents: toCents("200.00"),
+    });
+    if (!placedLimit.ok) throw new Error("setup failed");
+
+    const rows = await getOrdersForAccount(account.id);
+
+    expect(rows).toHaveLength(2);
+    // Newest first - the limit order was placed after the market order.
+    expect(rows[0]).toMatchObject({
+      symbol: "TSLA",
+      side: "buy",
+      type: "limit",
+      quantity: 2,
+      status: "pending",
+      limitPriceCents: toCents("200.00"),
+      filledPriceCents: null,
+    });
+    expect(rows[1]).toMatchObject({
+      symbol: "AAPL",
+      side: "buy",
+      type: "market",
+      quantity: 5,
+      status: "filled",
+      limitPriceCents: null,
+      filledPriceCents: toCents("100.00"),
+    });
+  });
+
+  it("filters to a single status when asked", async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+
+    mockQuote({ symbol: "AAPL", askCents: toCents("100.00"), bidCents: toCents("99.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 5 });
+
+    const placedLimit = await placeLimitOrder({
+      userId,
+      symbol: "TSLA",
+      side: "buy",
+      quantity: 2,
+      limitPriceCents: toCents("200.00"),
+    });
+    if (!placedLimit.ok) throw new Error("setup failed");
+
+    const account = await getOrCreateAccount(userId);
+    const pendingOnly = await getOrdersForAccount(account.id, { status: "pending" });
+
+    expect(pendingOnly).toHaveLength(1);
+    expect(pendingOnly[0]?.symbol).toBe("TSLA");
+  });
+
+  it("returns an empty list for an account with no orders", async () => {
+    const account = await getOrCreateAccount(randomUUID());
+
+    expect(await getOrdersForAccount(account.id)).toEqual([]);
   });
 });

@@ -1,0 +1,42 @@
+name: Keepalive (prevent scheduled-workflow auto-disable)
+
+# GitHub automatically disables every scheduled workflow in a repository
+# after 60 days with no commits - not 60 days with no workflow RUNS. The
+# limit-order-worker workflow running every 5 minutes forever does not, on
+# its own, prevent this: it isn't a commit. This workflow's only job is to
+# make one small, real commit well inside that 60-day window so the
+# scheduler for every workflow in this repo (this one included) stays
+# enabled indefinitely, even during a long stretch with no real code
+# changes.
+on:
+  schedule:
+    # Monthly - comfortably inside the 60-day disable window even if one
+    # run is ever missed.
+    - cron: "0 0 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record a keepalive commit
+        run: |
+          mkdir -p .github/keepalive
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/keepalive/last-run.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/keepalive/last-run.txt
+
+          if git diff --staged --quiet; then
+            echo "Nothing changed - skipping commit."
+            exit 0
+          fi
+
+          git commit -m "chore: keepalive commit to prevent scheduled-workflow auto-disable"
+          git push

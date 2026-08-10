@@ -1,0 +1,51 @@
+name: Limit order worker
+
+# Calls the deployed app's worker route on a schedule - the actual work
+# (claiming pending limit orders, checking fill conditions, the day-order
+# expire sweep) all lives behind that one HTTP endpoint
+# (app/api/worker/limit-orders/route.ts), not in this workflow. Swapping
+# the scheduler later (Vercel Cron, another cron host) is a config change -
+# point a different caller at the same URL with the same bearer secret -
+# not a rewrite of any worker logic. The route itself is also written to
+# be safe under irregular invocation (see its own comments), so a missed
+# or doubled-up tick here is never a correctness problem, only a latency
+# one.
+on:
+  schedule:
+    # Every 5 minutes - GitHub Actions' finest schedule granularity.
+    # Documented by GitHub itself as best-effort, not guaranteed to the
+    # minute under load - app/api/worker/status/route.ts's own staleness
+    # thresholds are deliberately several ticks more forgiving than this
+    # interval alone, specifically so one missed tick doesn't read as
+    # abnormal.
+    - cron: "*/5 * * * *"
+  # Lets this be triggered by hand from the Actions tab, for testing
+  # without waiting for the next scheduled tick.
+  workflow_dispatch: {}
+
+jobs:
+  invoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the worker route
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          LIMIT_ORDER_WORKER_SECRET: ${{ secrets.LIMIT_ORDER_WORKER_SECRET }}
+        run: |
+          if [ -z "$WORKER_URL" ] || [ -z "$LIMIT_ORDER_WORKER_SECRET" ]; then
+            echo "Missing the WORKER_URL or LIMIT_ORDER_WORKER_SECRET repository secret - see README.md's Setup section." >&2
+            exit 1
+          fi
+
+          status=$(curl -s -o /tmp/response.json -w "%{http_code}" -X POST \
+            "$WORKER_URL/api/worker/limit-orders" \
+            -H "Authorization: Bearer $LIMIT_ORDER_WORKER_SECRET")
+
+          echo "HTTP status: $status"
+          cat /tmp/response.json
+          echo
+
+          if [ "$status" -ge 400 ]; then
+            echo "Worker call failed." >&2
+            exit 1
+          fi
