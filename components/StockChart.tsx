@@ -262,7 +262,19 @@ export function StockChart({
     const chart = createChart(container, {
       width: container.clientWidth,
       height: totalHeight,
-      layout: { background: { color: "transparent" }, textColor: muted },
+      layout: {
+        background: { color: "transparent" },
+        textColor: muted,
+        // The library's own docs for this option are explicit: the
+        // interactive logo exists specifically to satisfy the Apache-2.0
+        // license's attribution requirement (their NOTICE file: a link to
+        // https://www.tradingview.com/) - disabling it here is only
+        // license-compliant because the static, non-interactive credit
+        // below the chart (not layered on top of the candles/markers)
+        // keeps that same link intact. Removing both would drop the
+        // required attribution entirely, not just tidy up the UI.
+        attributionLogo: false,
+      },
       grid: {
         vertLines: { color: gridLine },
         horzLines: { color: gridLine },
@@ -320,13 +332,21 @@ export function StockChart({
     );
 
     if (avgCostCents != null) {
+      // No axis label here - that badge is what collided with a recent
+      // trade marker in a real screenshot (a sell near the current price
+      // puts its "S 20" marker right where the avg-cost axis label also
+      // renders, both fighting for the same on-canvas space around the
+      // same price level). The dashed line itself stays as visual context;
+      // the actual "Avg cost $X" text now lives in the fixed top-left
+      // overlay below (avgCostReadout), which is plain HTML outside the
+      // canvas entirely and so can never overlap a marker no matter where
+      // in time or price that marker falls.
       candleSeries.createPriceLine({
         price: centsToDollars(avgCostCents),
         color: accent,
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: "Avg cost",
+        axisLabelVisible: false,
       });
     }
 
@@ -649,10 +669,32 @@ export function StockChart({
                 RSI <span ref={rsiReadoutRef} className="text-fg font-mono tabular-nums" />
               </span>
             )}
+            {avgCostCents != null && (
+              <span className="text-accent">
+                Avg cost{" "}
+                <span className="font-mono tabular-nums">${formatDollars(avgCostCents)}</span>
+              </span>
+            )}
           </div>
           <div ref={containerRef} />
         </div>
       )}
+      {/* Apache-2.0 attribution for lightweight-charts: the interactive
+          logo is turned off above (it was overlapping trade markers on the
+          canvas), but the library's license still requires a link back to
+          TradingView somewhere in the app - this static, non-canvas credit
+          is that link, kept deliberately small and outside the chart area
+          rather than removed outright. */}
+      <div className="border-default border-t px-3 py-1 text-right">
+        <a
+          href="https://www.tradingview.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-subtle hover:text-muted text-[10px]"
+        >
+          Charts by TradingView
+        </a>
+      </div>
     </div>
   );
 }

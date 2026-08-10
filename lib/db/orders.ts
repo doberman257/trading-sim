@@ -1,5 +1,5 @@
 import { and, asc, eq } from "drizzle-orm";
-import { fetchQuote } from "../market/alpaca";
+import { fetchQuote, NoTwoSidedQuoteError } from "../market/alpaca";
 import { executeMarketOrder } from "../trading/execute";
 import type { OrderResult, Side } from "../trading/types";
 import { getOrCreateAccount, loadAccountState } from "./accounts";
@@ -20,8 +20,42 @@ export async function placeMarketOrder({
   quantity,
 }: PlaceMarketOrderInput): Promise<OrderResult> {
   // Never hold a DB transaction open across a network call: fetch the quote
-  // and resolve the account before opening the transaction below.
-  const [quote, account] = await Promise.all([fetchQuote(symbol), getOrCreateAccount(userId)]);
+  // and resolve the account before opening the transaction below. Kept as
+  // two separate awaits, not Promise.all, so a NoTwoSidedQuoteError from
+  // fetchQuote can be caught on its own without also needing to guard
+  // against getOrCreateAccount throwing for an unrelated reason.
+  const accountPromise = getOrCreateAccount(userId);
+
+  let quote;
+  try {
+    quote = await fetchQuote(symbol);
+  } catch (error) {
+    if (!(error instanceof NoTwoSidedQuoteError)) {
+      throw error;
+    }
+
+    // A missing two-sided quote is a normal, expected market condition
+    // (most often the market being closed), not a config error like a bad
+    // API key - it gets the same "rejected order, still logged" treatment
+    // as insufficient_funds/insufficient_shares below, not an unhandled
+    // throw. CLAUDE.md: order rejection is a normal outcome, not an
+    // exception.
+    const account = await accountPromise;
+    return db.transaction(async (tx) => {
+      await tx.insert(orders).values({
+        accountId: account.id,
+        symbol,
+        side,
+        type: "market",
+        quantity,
+        status: "rejected",
+        rejectReason: "no_quote",
+      });
+      return { ok: false, reason: "no_quote" };
+    });
+  }
+
+  const account = await accountPromise;
 
   return db.transaction(async (tx) => {
     // Lock the account row before reading its balance. Without this, two

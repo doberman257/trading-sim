@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchQuote } from "../market/alpaca";
+import { fetchQuote, NoTwoSidedQuoteError } from "../market/alpaca";
 import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
@@ -14,10 +14,17 @@ import { assertLedgerBalances } from "./test-helpers";
 // Vitest hoists vi.mock calls above imports, so this replaces the real
 // fetchQuote before orders.ts (imported below) ever sees it. Everything
 // else in this file - transactions, locking, the ledger - hits the real
-// test database; only the external Alpaca call is stubbed.
-vi.mock("../market/alpaca", () => ({
-  fetchQuote: vi.fn(),
-}));
+// test database; only the external Alpaca call is stubbed. The real
+// NoTwoSidedQuoteError class is kept (not mocked away) so tests below can
+// mock fetchQuote to reject with a real `instanceof` match, exactly as
+// placeMarketOrder's own catch block checks for it.
+vi.mock("../market/alpaca", async () => {
+  const actual = await vi.importActual<typeof import("../market/alpaca")>("../market/alpaca");
+  return {
+    fetchQuote: vi.fn(),
+    NoTwoSidedQuoteError: actual.NoTwoSidedQuoteError,
+  };
+});
 
 // executeMarketOrder (called by placeMarketOrder) checks the real market
 // clock by default. Without this, every test here would pass or fail
@@ -114,6 +121,43 @@ describe("placeMarketOrder", () => {
     expect(newRow?.amountCents).toBe(-(toCents("100.00") * 10n));
 
     await assertLedgerBalances(account.id);
+  });
+
+  // Real market condition, not a hypothetical: Alpaca reports a zero-priced
+  // bid or ask when there's no active two-sided quote (most often while
+  // the market is closed) - fetchQuote turns that into a NoTwoSidedQuoteError
+  // rather than a Quote with a $0.00 side. placeMarketOrder must turn that
+  // into an ordinary rejection, not let it propagate as an unhandled
+  // throw - CLAUDE.md's "order rejection is a normal outcome" rule applies
+  // here just as much as to insufficient_funds/insufficient_shares.
+  it('rejects with "no_quote" and still logs the order when Alpaca has no two-sided quote, without touching cash', async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+    vi.mocked(fetchQuote).mockRejectedValue(new NoTwoSidedQuoteError("AAPL"));
+
+    const result = await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 1 });
+
+    expect(result).toEqual({ ok: false, reason: "no_quote" });
+
+    const [updatedAccount] = await db.select().from(accounts).where(eq(accounts.id, account.id));
+    expect(updatedAccount?.cashCents).toBe(account.cashCents);
+
+    const orderRows = await db.select().from(orders).where(eq(orders.accountId, account.id));
+    expect(orderRows).toHaveLength(1);
+    expect(orderRows[0]?.status).toBe("rejected");
+    expect(orderRows[0]?.rejectReason).toBe("no_quote");
+
+    await assertLedgerBalances(account.id);
+  });
+
+  it("still throws for a genuine fetchQuote failure unrelated to a missing quote (e.g. a config error)", async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+    vi.mocked(fetchQuote).mockRejectedValue(new Error("Missing ALPACA_KEY_ID"));
+
+    await expect(
+      placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 1 }),
+    ).rejects.toThrow(/Missing ALPACA_KEY_ID/);
   });
 
   it('a rejected order writes an order row with status "rejected" and does not change cash', async () => {

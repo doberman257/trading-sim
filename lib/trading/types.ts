@@ -35,6 +35,12 @@ export type RejectReason =
   | "insufficient_shares"
   | "invalid_quantity"
   | "market_closed"
-  | "stale_quote";
+  | "stale_quote"
+  // Alpaca returned a quote with a zero-priced bid or ask - no active
+  // two-sided market right now (most often seen while the market is
+  // closed), not a real price. See NoTwoSidedQuoteError in
+  // lib/market/alpaca.ts, which is what placeMarketOrder catches to
+  // produce this reason instead of letting the error propagate.
+  | "no_quote";
 
 export type OrderResult = { ok: true; fill: Fill } | { ok: false; reason: RejectReason };

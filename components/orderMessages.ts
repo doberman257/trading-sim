@@ -47,6 +47,8 @@ export function describeRejection(
       return closedMessage(context.marketStatus);
     case "stale_quote":
       return "The price quote used for this order has gone stale. Try submitting again for a fresh price.";
+    case "no_quote":
+      return `No live two-sided quote is available for ${context.symbol} right now - try again once the market has an active price.`;
     case "invalid_quantity":
       return "Enter a whole number of shares greater than zero.";
     default: {

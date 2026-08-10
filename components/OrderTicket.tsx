@@ -7,6 +7,7 @@ import { getQuoteForSymbol } from "@/app/actions/quote";
 import { placeTrade } from "@/app/actions/trade";
 import type { MarketStatus } from "@/lib/trading/market-hours";
 import { formatCents, multiply, type Cents } from "@/lib/trading/money";
+import { describeWideSpreadWarning, isSpreadImplausiblyWide } from "@/lib/trading/quote";
 import { SymbolSchema } from "@/lib/trading/symbol";
 import type { RejectReason, Side } from "@/lib/trading/types";
 
@@ -98,6 +99,16 @@ export function OrderTicket({
   const estimatedAmountCents =
     quote && isValidQuantity
       ? multiply(side === "buy" ? quote.askCents : quote.bidCents, quantity)
+      : null;
+
+  // Informational only - does not disable submission. A wide spread is
+  // still a real quote (unlike the zero-priced-side case, which
+  // getQuoteForSymbol already turns into "unavailable"), and the actual
+  // fill price is re-fetched at submit time regardless, so this is a
+  // heads-up on the estimate shown, not a claim the order would be unsafe.
+  const wideSpreadWarning =
+    quote && isSpreadImplausiblyWide(quote.bidCents, quote.askCents)
+      ? describeWideSpreadWarning(symbol)
       : null;
 
   const disabledReason = !marketStatus.open
@@ -227,6 +238,7 @@ export function OrderTicket({
             {estimatedAmountCents !== null ? `$${formatCents(estimatedAmountCents)}` : "—"}
           </span>
         </div>
+        {wideSpreadWarning && <p className="text-warn text-xs leading-snug">{wideSpreadWarning}</p>}
         <p className="text-subtle text-xs leading-snug">
           Estimate only - the actual fill price is determined when the order executes and can
           differ.
