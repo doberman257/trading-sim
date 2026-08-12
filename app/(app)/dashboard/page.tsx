@@ -1,4 +1,7 @@
 import { redirect } from "next/navigation";
+import { BotRunForm } from "@/components/BotRunForm";
+import { BotRunsPanel } from "@/components/BotRunsPanel";
+import { BotStatsPanel } from "@/components/BotStatsPanel";
 import { MarketStatusBanner } from "@/components/MarketStatusBanner";
 import { OrderTicket } from "@/components/OrderTicket";
 import { PendingOrdersPanel } from "@/components/PendingOrdersPanel";
@@ -7,6 +10,8 @@ import { PositionsPanel } from "@/components/PositionsPanel";
 import { RecentOrdersPanel } from "@/components/RecentOrdersPanel";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { getOrCreateAccount } from "@/lib/db/accounts";
+import { getBotRunsForAccount } from "@/lib/db/bot-runs";
+import { getBotRuleStatsForAccount } from "@/lib/db/bot-stats";
 import { getLastLimitOrderWorkerRun } from "@/lib/db/limit-order-worker";
 import { getPendingOrdersForAccount } from "@/lib/db/orders";
 import { getPortfolio } from "@/lib/db/portfolio";
@@ -48,12 +53,15 @@ export default async function DashboardPage() {
   // orders panel and its staleness signal below - fetched here, not inside
   // that Client Component, since this Server Component already loads
   // everything else the page needs in one place.
-  const [{ quotes }, sparklineBars, pendingOrders, lastWorkerRun] = await Promise.all([
-    fetchQuotes(symbols),
-    fetchDailyBarsForSymbols(symbols),
-    getPendingOrdersForAccount(account.id),
-    getLastLimitOrderWorkerRun(),
-  ]);
+  const [{ quotes }, sparklineBars, pendingOrders, lastWorkerRun, botRuns, botRuleStats] =
+    await Promise.all([
+      fetchQuotes(symbols),
+      fetchDailyBarsForSymbols(symbols),
+      getPendingOrdersForAccount(account.id),
+      getLastLimitOrderWorkerRun(),
+      getBotRunsForAccount(account.id),
+      getBotRuleStatsForAccount(account.id),
+    ]);
   const sparklines = new Map(
     [...sparklineBars.entries()].map(([symbol, bars]) => [
       symbol,
@@ -125,6 +133,31 @@ export default async function DashboardPage() {
           }))}
           workerStale={workerStale}
         />
+        {/* Autonomous bot: config form, this account's own runs, and the
+            rule-level stats view - grouped together since they're all part
+            of the same feature, below everything else on the page (a
+            standing feature, not the main trading workflow). The bot
+            worker itself isn't scheduled yet (see STATE.md) - a run starts
+            "selecting" and is picked up either by the one immediate cycle
+            the create route triggers or the next manual worker invocation. */}
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
+          <BotRunForm />
+          <BotRunsPanel
+            runs={botRuns.map((run) => ({
+              id: run.id,
+              status: run.status,
+              ruleId: run.ruleId,
+              capitalCents: run.capitalCents.toString(),
+              selectedSymbol: run.selectedSymbol,
+              entryTotalCents: run.entryTotalCents?.toString() ?? null,
+              entryQuantity: run.entryQuantity,
+              realizedPnlCents: run.realizedPnlCents?.toString() ?? null,
+              createdAt: run.createdAt.toISOString(),
+              closedAt: run.closedAt?.toISOString() ?? null,
+            }))}
+          />
+        </div>
+        <BotStatsPanel stats={botRuleStats} />
       </div>
     </main>
   );

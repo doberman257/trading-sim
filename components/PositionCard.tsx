@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Delta } from "./Delta";
 import { Sparkline } from "./Sparkline";
 import { formatCents } from "@/lib/trading/money";
@@ -6,7 +7,11 @@ import type { PositionRowProps } from "./PositionRow";
 // The mobile counterpart of PositionRow (a <tr>) - see the trading-ui-design
 // skill's Responsive tables pattern for why this is a separate component
 // rather than the same markup toggled by CSS: a <tr> outside a <table> is
-// invalid HTML and gets silently dropped by the browser.
+// invalid HTML and gets silently dropped by the browser. Also why this one,
+// unlike PositionRow, links the whole card rather than just the symbol -
+// same reasoning as PopularStockCard: a <tr> can't validly be wrapped in
+// its own <a>, but a <div>-shaped card can, so the whole card is the tap
+// target here.
 export function PositionCard({
   symbol,
   quantity,
@@ -25,7 +30,10 @@ export function PositionCard({
     percent === null;
 
   return (
-    <div className="border-default bg-elevated rounded-md border p-3">
+    <Link
+      href={`/stock/${symbol}`}
+      className="border-default bg-elevated hover:bg-selected block rounded-md border p-3 transition-colors"
+    >
       <div className="mb-2 flex items-center justify-between">
         <span className="text-fg font-medium">{symbol}</span>
         {priceUnavailable ? (
@@ -66,6 +74,6 @@ export function PositionCard({
         <span className="text-muted text-xs">30d trend</span>
         <Sparkline closesCents={sparklineCloses} />
       </div>
-    </div>
+    </Link>
   );
 }

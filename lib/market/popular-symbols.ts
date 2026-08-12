@@ -24,3 +24,16 @@ export const POPULAR_SYMBOLS: readonly PopularSymbol[] = [
   { symbol: "WMT", name: "Walmart Inc." },
   { symbol: "DIS", name: "The Walt Disney Company" },
 ];
+
+// The autonomous bot's curated selection universe (lib/db/bot-runs.ts) -
+// reuses this exact list rather than inventing a separate one, since every
+// symbol here is already verified against the real synced assets table
+// (see the comment above). Honest scope limit, not a design decision: the
+// bot design proposal called for "a few hundred liquid names," and this is
+// 12 - hand-curating a few hundred verified tickers is a real, separate
+// data-curation task this round didn't do. Exported as its own constant so
+// growing this list later (the actual fix) is a one-line change here, not a
+// bot-runs.ts rewrite - see STATE.md's deferred list.
+export const BOT_WATCHLIST_SYMBOLS: readonly string[] = POPULAR_SYMBOLS.map(
+  (entry) => entry.symbol,
+);

@@ -76,6 +76,40 @@ describe("searchAssets", () => {
 
     expect(await searchAssets("dead")).toEqual([]);
   });
+
+  // The real bug this guards against, confirmed against the live asset
+  // table before fixing: "intel" is also a mid-word substring of
+  // "intelligence", and the real table has ~30 tradable "Artificial
+  // Intelligence"-branded funds - all of which used to outrank Intel
+  // Corporation itself (whose name genuinely starts with "Intel") purely
+  // by alphabetical symbol order within an undifferentiated "name contains
+  // it somewhere" tier, pushing INTC to position 20 of a 20-row limit.
+  it("ranks a name-prefix match above a name that merely contains the query mid-word", async () => {
+    await seedAssets([
+      { symbol: "AIFD", name: "TCW Artificial Intelligence ETF" },
+      { symbol: "AIO", name: "Virtus Artificial Intelligence Fund" },
+      { symbol: "INTC", name: "Intel Corporation Common Stock" },
+    ]);
+
+    const results = await searchAssets("intel");
+
+    expect(results.map((r) => r.symbol)).toEqual(["INTC", "AIFD", "AIO"]);
+  });
+
+  it("still ranks a symbol match above a name-prefix match", async () => {
+    await seedAssets([
+      { symbol: "INTC", name: "Intel Corporation Common Stock" },
+      { symbol: "INTEL", name: "Some Unrelated Fund" },
+    ]);
+
+    // The new name-prefix tier (2) must slot in below the existing symbol
+    // tiers (0, 1), not ahead of them - INTEL's symbol is an exact match
+    // for the query, which should still win over INTC's mere name-prefix
+    // match even though INTC is the "real" company here.
+    const results = await searchAssets("intel");
+
+    expect(results.map((r) => r.symbol)).toEqual(["INTEL", "INTC"]);
+  });
 });
 
 describe("getLastSuccessfulAssetSync", () => {

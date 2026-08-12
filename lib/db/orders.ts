@@ -75,6 +75,11 @@ export type PlaceMarketOrderInput = {
   symbol: string;
   side: Side;
   quantity: number;
+  // Set only when this app itself is placing the order on a bot run's
+  // behalf (see lib/db/bot-runs.ts) - null for every order a human placed
+  // directly. Threaded through to both insert(orders) calls below so a
+  // rejection is tagged exactly like a fill.
+  botRunId?: string;
 };
 
 export async function placeMarketOrder({
@@ -82,6 +87,7 @@ export async function placeMarketOrder({
   symbol,
   side,
   quantity,
+  botRunId,
 }: PlaceMarketOrderInput): Promise<OrderResult> {
   // Never hold a DB transaction open across a network call: fetch the quote
   // and resolve the account before opening the transaction below. Kept as
@@ -114,6 +120,7 @@ export async function placeMarketOrder({
         quantity,
         status: "rejected",
         rejectReason: "no_quote",
+        botRunId,
       });
       return { ok: false, reason: "no_quote" };
     });
@@ -152,6 +159,7 @@ export async function placeMarketOrder({
         quantity,
         status: "rejected",
         rejectReason: result.reason,
+        botRunId,
       });
 
       return result;
@@ -170,6 +178,7 @@ export async function placeMarketOrder({
         status: "filled",
         filledPriceCents: fill.priceCents,
         filledAt: new Date(),
+        botRunId,
       })
       .returning({ id: orders.id });
 
@@ -231,6 +240,9 @@ export type PlaceLimitOrderInput = {
   side: Side;
   quantity: number;
   limitPriceCents: Cents;
+  // Same meaning as PlaceMarketOrderInput.botRunId above - set only for the
+  // resting profit-target sell a bot run places for itself.
+  botRunId?: string;
 };
 
 // Unlike placeMarketOrder, this never touches Alpaca - a limit order's
@@ -246,6 +258,7 @@ export async function placeLimitOrder({
   side,
   quantity,
   limitPriceCents,
+  botRunId,
 }: PlaceLimitOrderInput): Promise<PlaceLimitOrderResult> {
   const account = await getOrCreateAccount(userId);
 
@@ -287,6 +300,7 @@ export async function placeLimitOrder({
         limitPriceCents,
         status: "rejected",
         rejectReason: decision.reason,
+        botRunId,
       });
 
       return decision;
@@ -302,6 +316,7 @@ export async function placeLimitOrder({
         quantity,
         limitPriceCents,
         status: "pending",
+        botRunId,
       })
       .returning({ id: orders.id });
 
@@ -313,26 +328,32 @@ export async function placeLimitOrder({
   });
 }
 
-// Cancels a pending limit order - or reports why it couldn't be. Locks the
-// order row itself, not the account row: this is the exact same lock
-// primitive the worker's own claim step uses (see
-// lib/db/limit-order-worker.ts), specifically so a user's cancellation and
-// the worker's fill attempt on the same order are a genuine race decided
-// by whichever transaction's SELECT ... FOR UPDATE gets there first, not
-// by two independent, uncoordinated checks that could both "succeed."
+// The core of cancelOrder below, scoped by accountId directly rather than
+// resolved from a userId - exported separately so lib/db/bot-runs.ts (which
+// already has a bot run's own accountId on hand, and no userId to resolve
+// it from) can call the exact same lock-and-check logic a human's
+// cancellation goes through, instead of either duplicating it or needing a
+// userId that doesn't exist in that context. Locks the order row itself,
+// not the account row: this is the exact same lock primitive the worker's
+// own claim step uses (see lib/db/limit-order-worker.ts), specifically so a
+// cancellation and a fill attempt on the same order are a genuine race
+// decided by whichever transaction's SELECT ... FOR UPDATE gets there
+// first, not by two independent, uncoordinated checks that could both
+// "succeed."
 //
 // Scoped to accountId in the same WHERE as the id, not checked afterward -
 // an order id that exists but belongs to a different account must look
 // identical to one that doesn't exist at all, so this never confirms or
 // denies which case it was.
-export async function cancelOrder(userId: string, orderId: string): Promise<CancelOrderResult> {
-  const account = await getOrCreateAccount(userId);
-
+export async function cancelOrderByAccountId(
+  accountId: string,
+  orderId: string,
+): Promise<CancelOrderResult> {
   return db.transaction(async (tx) => {
     const [order] = await tx
       .select({ id: orders.id, status: orders.status })
       .from(orders)
-      .where(and(eq(orders.id, orderId), eq(orders.accountId, account.id)))
+      .where(and(eq(orders.id, orderId), eq(orders.accountId, accountId)))
       .for("update");
 
     if (!order) {
@@ -351,6 +372,15 @@ export async function cancelOrder(userId: string, orderId: string): Promise<Canc
 
     return { ok: true };
   });
+}
+
+// The human-facing entry point (Route Handlers resolve a session to a
+// userId, never an accountId directly) - a thin resolve-then-delegate to
+// cancelOrderByAccountId above, which is where the actual lock-and-check
+// logic lives.
+export async function cancelOrder(userId: string, orderId: string): Promise<CancelOrderResult> {
+  const account = await getOrCreateAccount(userId);
+  return cancelOrderByAccountId(account.id, orderId);
 }
 
 export type SymbolOrderFill = {
