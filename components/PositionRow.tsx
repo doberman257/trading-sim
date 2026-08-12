@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Delta } from "./Delta";
 import { Sparkline } from "./Sparkline";
 import { formatCents } from "@/lib/trading/money";
@@ -40,7 +41,9 @@ export function PositionRow({
     return (
       <tr className="border-default/50 hover:bg-elevated border-b transition-colors">
         <td className="text-fg px-3 py-2.5 font-medium">
-          {symbol}
+          <Link href={`/stock/${symbol}`} className="hover:underline">
+            {symbol}
+          </Link>
           <span
             className="text-subtle ml-2 inline-flex items-center gap-1 text-xs font-normal"
             title="No quote is currently available for this symbol"
@@ -68,7 +71,9 @@ export function PositionRow({
   return (
     <tr className="border-default/50 hover:bg-elevated border-b transition-colors">
       <td className="text-fg px-3 py-2.5 font-medium">
-        {symbol}
+        <Link href={`/stock/${symbol}`} className="hover:underline">
+          {symbol}
+        </Link>
         {isStale && (
           <span
             className="text-warn ml-2 inline-flex items-center gap-1 text-xs font-normal"

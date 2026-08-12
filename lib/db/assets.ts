@@ -194,14 +194,29 @@ export async function searchAssets(query: string): Promise<AssetSearchResult[]> 
         or(ilike(assets.symbol, pattern), ilike(assets.name, pattern)),
       ),
     )
-    // Exact symbol match first, then symbol-prefix match, then everything
-    // else alphabetically - so searching "AAPL" surfaces AAPL above a longer
-    // symbol or a company name that merely contains the substring.
+    // Exact symbol match, then symbol-prefix match, then name-prefix match,
+    // then everything else alphabetically. The name-prefix tier is what
+    // makes searching "intel" actually surface Intel Corporation - without
+    // it, a real, confirmed case (verified against the live asset table,
+    // not hypothesized): "intel" is also a mid-word substring of
+    // "intelligence", and this table has ~30 tradable "Artificial
+    // Intelligence"-branded funds. Those all fall into the same
+    // undifferentiated "name contains it somewhere" tier a plain
+    // name-substring match would use, and alphabetical-by-symbol sorting
+    // within that tier put every one of them ahead of INTC (whose name
+    // genuinely STARTS with "Intel"), pushing the actually-relevant result
+    // to the last position of a 20-row limit - which for a fixed-height
+    // dropdown of a handful of visible rows means invisible in practice,
+    // not merely "ranked lower". A name-prefix match is a categorically
+    // better signal than "the query appears somewhere in the name" and
+    // earns its own tier above it, the same way a symbol-prefix match
+    // already does over a bare symbol-substring match.
     .orderBy(
       sql`case
         when ${assets.symbol} = ${upperTrimmed} then 0
         when ${assets.symbol} ilike ${prefixPattern} then 1
-        else 2
+        when ${assets.name} ilike ${prefixPattern} then 2
+        else 3
       end`,
       assets.symbol,
     )

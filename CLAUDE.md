@@ -20,6 +20,7 @@ Reject quotes older than 60 seconds (stale_quote).
 Order rejection is a normal outcome, not an exception. Return a discriminated union (OrderResult), do not throw.
 Average cost changes on buy, stays the same on sell.
 Realized P&L is only computed on sell.
+The autonomous bot never decides. A bot buy/sell decision must trace to an explicit, stated rule over price/volume/SMA/EMA/RSI, evaluated by a pure function (lib/trading/bot-rule.ts) with no external call in the decision path. If Claude API is ever used for a bot run, it may only narrate a decision already made (e.g. "why did this rule fire") — never receive a "what should happen next" prompt, and its output must never be read by any code that places, sizes, or cancels an order.
 Verification — required after every change
 npm run verify
 

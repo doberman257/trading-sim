@@ -4,11 +4,12 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition, type FormEvent } from "react";
 import { closedMessage } from "./MarketStatusBanner";
 import { describeRejection, estimatedAmountLabel, limitOrderAmountLabel } from "./orderMessages";
+import { StockQuoteCard } from "./StockQuoteCard";
+import { SymbolAutocomplete } from "./SymbolAutocomplete";
 import { getQuoteForSymbol } from "@/app/actions/quote";
 import { placeTrade } from "@/app/actions/trade";
 import type { MarketStatus } from "@/lib/trading/market-hours";
 import { formatCents, multiply, toCents, type Cents } from "@/lib/trading/money";
-import { describeWideSpreadWarning, isSpreadImplausiblyWide } from "@/lib/trading/quote";
 import { SymbolSchema } from "@/lib/trading/symbol";
 import type { RejectReason, Side } from "@/lib/trading/types";
 
@@ -128,19 +129,6 @@ export function OrderTicket({
   // "needed" if the order gets rejected for insufficient funds/shares.
   const limitBoundCents =
     limitPriceCents !== null && isValidQuantity ? multiply(limitPriceCents, quantity) : null;
-
-  // Informational only - does not disable submission. A wide spread is
-  // still a real quote (unlike the zero-priced-side case, which
-  // getQuoteForSymbol already turns into "unavailable"), and the actual
-  // fill price is re-fetched at submit time regardless, so this is a
-  // heads-up on the estimate shown, not a claim the order would be unsafe.
-  // Only shown for a market order - a limit order's whole point is to
-  // ignore the current spread and wait for its own price, so a caveat
-  // about the CURRENT spread being wide has nothing to say about it.
-  const wideSpreadWarning =
-    orderType === "market" && quote && isSpreadImplausiblyWide(quote.bidCents, quote.askCents)
-      ? describeWideSpreadWarning(symbol)
-      : null;
 
   // A limit order never needs the market to be open or a live quote to be
   // ACCEPTED - see lib/trading/limit-reservation.ts's own note on why
@@ -326,16 +314,47 @@ export function OrderTicket({
         ) : (
           <label className="flex flex-col gap-1">
             <span className="text-muted text-xs">Symbol</span>
-            <input
+            <SymbolAutocomplete
               value={symbolInput}
-              onChange={(event) => setSymbolInput(event.target.value.toUpperCase())}
-              placeholder="AAPL"
-              maxLength={5}
-              autoComplete="off"
-              className={inputClassName}
+              onValueChange={setSymbolInput}
+              onSelect={setSymbolInput}
+              placeholder="AAPL or company name"
+              inputClassName={inputClassName}
             />
           </label>
         )}
+
+        {/* Immediately visible once a symbol is chosen, not just at
+            submit - the same bid/ask/spread StockQuoteCard already shows
+            on the stock detail page, sized for this narrower column
+            (compact) and, for a limit order, without the wide-spread
+            caveat: that caveat is about the risk of transacting against
+            the CURRENT quote right now, which a limit order deliberately
+            doesn't do.
+
+            Only rendered when the symbol is searchable (no fixedSymbol) -
+            when fixedSymbol IS set, the stock detail page already shows
+            this exact symbol's full-size StockQuoteCard just above the
+            tabs, always visible regardless of which tab is active. Showing
+            the same bid/ask/spread a second time, inside the ticket, would
+            just be the same numbers twice on screen at once - the ticket's
+            own copy earns its place only where it's the sole source of
+            price info, which today means the dashboard's free-search
+            context specifically. */}
+        {!fixedSymbol &&
+          isValidSymbol &&
+          (quoteStatus === "loading" ? (
+            <p className="text-muted text-xs">Fetching price…</p>
+          ) : (
+            <StockQuoteCard
+              symbol={symbol}
+              bidCents={quote?.bidCents ?? null}
+              askCents={quote?.askCents ?? null}
+              isStale={!marketStatus.open}
+              compact
+              showWideSpreadWarning={orderType === "market"}
+            />
+          ))}
 
         <label className="flex flex-col gap-1">
           <span className="text-muted text-xs">Quantity</span>
@@ -380,7 +399,6 @@ export function OrderTicket({
                 : "—"}
           </span>
         </div>
-        {wideSpreadWarning && <p className="text-warn text-xs leading-snug">{wideSpreadWarning}</p>}
         {orderType === "market" ? (
           <p className="text-subtle text-xs leading-snug">
             Estimate only - the actual fill price is determined when the order executes and can
