@@ -25,6 +25,35 @@ export const RSI_PULLBACK_UPTREND_V1_PARAMS: BotRuleParams = {
   smaPeriod: 50,
 };
 
+// v2: entry threshold raised from 30 to 40, everything else unchanged from
+// v1 - the decision made after a real historical scan (see STATE.md for
+// the full four-variant comparison and reasoning). SMA(50) - the "is this
+// genuinely an uptrend" half of the rule - is deliberately left alone;
+// only the "how oversold" bar moved, so this still buys pullbacks within a
+// real medium-term uptrend, not a looser trend definition. Shipped as a
+// new id, not an edit to v1's own params, for the exact reason v1's own
+// comment above states: bot_runs rows already recorded under v1 must keep
+// meaning what they meant when they were run, not be silently
+// reinterpreted by a later parameter change.
+export const RSI_PULLBACK_UPTREND_V2_ID = "rsi_pullback_uptrend_v2";
+
+export const RSI_PULLBACK_UPTREND_V2_PARAMS: BotRuleParams = {
+  rsiPeriod: DEFAULT_RSI_PERIOD,
+  rsiEntryThreshold: 40,
+  rsiExitThreshold: 50,
+  smaPeriod: 50,
+};
+
+// The one rule the worker actually uses today - a single, explicit,
+// grep-able pointer, so switching which version is "active" is always a
+// deliberate one-line change here, never an accidental silent
+// reinterpretation at whichever call site happens to reference a rule
+// constant directly. lib/db/bot-runs.ts imports only this, never
+// RSI_PULLBACK_UPTREND_V1_ID/V2_ID directly, so a future v3 needs exactly
+// one line changed, not a search-and-replace across the codebase.
+export const ACTIVE_RULE_ID = RSI_PULLBACK_UPTREND_V2_ID;
+export const ACTIVE_RULE_PARAMS = RSI_PULLBACK_UPTREND_V2_PARAMS;
+
 // Already-computed indicator values for one symbol at one point in time -
 // not a price series. Computing RSI/SMA from a raw closes array is a
 // separate, also-pure step (see lib/db/bot-runs.ts, which has to fetch bars

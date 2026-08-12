@@ -8,7 +8,6 @@ import { PendingOrdersPanel } from "@/components/PendingOrdersPanel";
 import { PortfolioAllocation } from "@/components/PortfolioAllocation";
 import { PositionsPanel } from "@/components/PositionsPanel";
 import { RecentOrdersPanel } from "@/components/RecentOrdersPanel";
-import { ResetAccountButton } from "@/components/ResetAccountButton";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getBotRunsForAccount } from "@/lib/db/bot-runs";
@@ -140,8 +139,11 @@ export default async function DashboardPage() {
             standing feature, not the main trading workflow). The bot
             worker itself isn't scheduled yet (see STATE.md) - a run starts
             "selecting" and is picked up either by the one immediate cycle
-            the create route triggers or the next manual worker invocation. */}
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
+            the create route triggers or the next manual worker invocation.
+            The id is what the header's "N active bot runs" link (UserMenu,
+            visible on every page) jumps straight to, since the bot panels
+            themselves only render here. */}
+        <div id="bot" className="grid grid-cols-1 gap-3 lg:grid-cols-[320px_1fr]">
           <BotRunForm />
           <BotRunsPanel
             runs={botRuns.map((run) => ({
@@ -159,7 +161,6 @@ export default async function DashboardPage() {
           />
         </div>
         <BotStatsPanel stats={botRuleStats} />
-        <ResetAccountButton />
       </div>
     </main>
   );

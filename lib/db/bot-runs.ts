@@ -1,13 +1,9 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { fetchDailyBarsForSymbols, fetchQuotes, type Bar } from "../market/alpaca";
 import { BOT_WATCHLIST_SYMBOLS } from "../market/popular-symbols";
 import { isApproachingMarketClose } from "../trading/bot-day-expiry";
 import { computeBotRunRealizedPnl } from "../trading/bot-pnl";
-import {
-  RSI_PULLBACK_UPTREND_V1_ID,
-  RSI_PULLBACK_UPTREND_V1_PARAMS,
-  ruleShouldExit,
-} from "../trading/bot-rule";
+import { ACTIVE_RULE_ID, ACTIVE_RULE_PARAMS, ruleShouldExit } from "../trading/bot-rule";
 import { rankEligibleBotCandidates, type BotCandidate } from "../trading/bot-selection";
 import { computeBotOrderQuantity } from "../trading/bot-sizing";
 import {
@@ -115,8 +111,8 @@ export async function createBotRun(input: CreateBotRunInput): Promise<CreateBotR
     .insert(botRuns)
     .values({
       accountId: account.id,
-      ruleId: RSI_PULLBACK_UPTREND_V1_ID,
-      ruleParams: RSI_PULLBACK_UPTREND_V1_PARAMS,
+      ruleId: ACTIVE_RULE_ID,
+      ruleParams: ACTIVE_RULE_PARAMS,
       capitalCents: input.capitalCents,
       profitTargetType: profitTargetColumns.type,
       profitTargetValueCents: profitTargetColumns.valueCents,
@@ -167,6 +163,24 @@ export async function getBotRunsForAccount(accountId: string): Promise<BotRunFor
     .orderBy(desc(botRuns.createdAt));
 }
 
+// "Active" means still in flight - selecting a candidate or holding a
+// position - not yet resolved to any of the closed/failed terminal states.
+// This is what the header's UserMenu (rendered on every authenticated page,
+// not just the dashboard) shows as a quick "N active bot runs" status, since
+// the bot panels themselves only render on the dashboard - a user browsing
+// Discover or a stock page would otherwise have no visibility into whether
+// a run is still working without navigating back.
+export async function getActiveBotRunCount(accountId: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<string>`count(*)` })
+    .from(botRuns)
+    .where(
+      and(eq(botRuns.accountId, accountId), inArray(botRuns.status, ["selecting", "holding"])),
+    );
+
+  return row ? Number(row.count) : 0;
+}
+
 // One watchlist symbol's signals, built from a batched bars+quotes fetch -
 // null when there isn't enough history yet (a symbol newly added to the
 // watchlist) or no live quote right now, in which case it's simply excluded
@@ -184,8 +198,8 @@ function buildCandidates(
     if (!bars || bars.length === 0 || !quote) continue;
 
     const closes = bars.map((bar) => bar.closeCents);
-    const latestRsi = rsi(closes, RSI_PULLBACK_UPTREND_V1_PARAMS.rsiPeriod).at(-1);
-    const latestSma = sma(closes, RSI_PULLBACK_UPTREND_V1_PARAMS.smaPeriod).at(-1);
+    const latestRsi = rsi(closes, ACTIVE_RULE_PARAMS.rsiPeriod).at(-1);
+    const latestSma = sma(closes, ACTIVE_RULE_PARAMS.smaPeriod).at(-1);
     const latestClose = closes.at(-1);
     const latestVolume = bars.at(-1)?.volume;
 
@@ -262,7 +276,7 @@ async function runSelectionCycle(
   ]);
   const ranked = rankEligibleBotCandidates(
     buildCandidates(BOT_WATCHLIST_SYMBOLS, barsMap, quotesResult.quotes),
-    RSI_PULLBACK_UPTREND_V1_PARAMS,
+    ACTIVE_RULE_PARAMS,
   );
 
   let entered = 0;
@@ -588,8 +602,8 @@ async function monitorOneBotRun(
   } else {
     const bars = barsMap.get(selectedSymbol);
     const closes = bars?.map((bar) => bar.closeCents) ?? [];
-    const latestRsi = rsi(closes, RSI_PULLBACK_UPTREND_V1_PARAMS.rsiPeriod).at(-1);
-    if (latestRsi != null && ruleShouldExit({ rsi: latestRsi }, RSI_PULLBACK_UPTREND_V1_PARAMS)) {
+    const latestRsi = rsi(closes, ACTIVE_RULE_PARAMS.rsiPeriod).at(-1);
+    if (latestRsi != null && ruleShouldExit({ rsi: latestRsi }, ACTIVE_RULE_PARAMS)) {
       exitReason = "closed_rule_exit";
     }
   }

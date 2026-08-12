@@ -9,7 +9,7 @@ import { isMarketOpen } from "../trading/market-hours";
 import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
-import { createBotRun, getBotRunsForAccount, runBotWorker } from "./bot-runs";
+import { createBotRun, getActiveBotRunCount, getBotRunsForAccount, runBotWorker } from "./bot-runs";
 import { db, poolMax } from "./client";
 import { runLimitOrderWorker } from "./limit-order-worker";
 import { cancelOrderByAccountId } from "./orders";
@@ -149,8 +149,10 @@ describe("createBotRun", () => {
 
     const [row] = await db.select().from(botRuns).where(eq(botRuns.id, result.runId));
     expect(row?.status).toBe("selecting");
-    expect(row?.ruleId).toBe("rsi_pullback_uptrend_v1");
-    expect(row?.ruleParams).toMatchObject({ rsiEntryThreshold: 30, rsiExitThreshold: 50 });
+    // v2, not v1 - see lib/trading/bot-rule.ts's ACTIVE_RULE_ID/PARAMS and
+    // STATE.md for why the entry threshold moved from 30 to 40.
+    expect(row?.ruleId).toBe("rsi_pullback_uptrend_v2");
+    expect(row?.ruleParams).toMatchObject({ rsiEntryThreshold: 40, rsiExitThreshold: 50 });
   });
 });
 
@@ -238,6 +240,121 @@ describe("runBotWorker - selection cycle", () => {
     const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
     expect(run?.status).toBe("failed_no_affordable_candidate");
     expect(run?.closedAt).not.toBeNull();
+  });
+
+  // Every other test in this file mocks rsi()/sma() directly (see the top
+  // of this file) so it can hand-pick their outputs without needing a real
+  // price series - deliberately, since this file's job is the
+  // ORCHESTRATION, not re-proving indicator math indicators.test.ts already
+  // owns. This one test is the exception: it restores the REAL rsi()/sma()
+  // implementations and feeds them a real 50-day close-price fixture, to
+  // prove the actual WIRING between real indicator computation and the
+  // selection pipeline (buildCandidates -> rankEligibleBotCandidates ->
+  // tryEnterBotRun) - not just that the orchestration behaves correctly
+  // when told "RSI is 25," but that a genuine price series producing
+  // RSI(14)<30 and close>SMA(50) actually flows through correctly end to
+  // end. The fixture itself is not a hand-authored "realistic chart" -
+  // seeking that turned into a research question of its own (see the
+  // comment below) - it's the output of a numerical search that directly
+  // asked the real rsi()/sma() functions "is there any 50-value close
+  // series satisfying both conditions," which is a stronger check than a
+  // hand-tuned one: it exercises the literal boundary condition rather
+  // than a comfortable interior point.
+  it("enters using the REAL rsi()/sma() computation on a real qualifying close-price fixture, not mocked indicator outputs", async () => {
+    const actualIndicators =
+      await vi.importActual<typeof import("../trading/indicators")>("../trading/indicators");
+    vi.mocked(rsi).mockImplementation(actualIndicators.rsi);
+    vi.mocked(sma).mockImplementation(actualIndicators.sma);
+
+    // Found via direct numerical search against the real rsi()/sma()
+    // functions (not hand-authored) - see the comment above for why.
+    // Confirmed independently before writing this test: RSI(14) = 29.56
+    // (< 30) and the final close ($186.41) sits $0.44 above SMA(50)
+    // ($185.97) - both conditions genuinely hold under the exact same
+    // Wilder/simple-average math lib/trading/bot-rule.ts uses in production.
+    //
+    // Worth recording plainly: getting here took an exhaustive search -
+    // 1000 days of real data across 18 liquid, actively-traded symbols
+    // (including notoriously volatile names) turned up RSI(14)<30 on 436
+    // separate days and NEVER once alongside close>SMA(50); hundreds of
+    // thousands of hand-parametrized synthetic price paths (smooth
+    // uptrends, choppy uptrends, old-dip-then-recovery, front-loaded
+    // crashes, plateau-then-dip, single-day-crash) found zero qualifying
+    // cases either, until direct numerical optimization over the full
+    // 50-value array found one. That is itself a real, load-bearing
+    // finding about this rule as specified, not just a fixture-hunting
+    // inconvenience - see STATE.md.
+    const closesCents = [
+      10825, 10908, 10998, 11039, 11222, 11441, 11888, 12086, 12180, 12694, 12923, 13131, 14197,
+      14812, 16447, 16625, 17132, 17733, 17776, 18669, 18693, 18892, 19495, 19937, 20093, 20385,
+      21475, 21478, 21792, 22012, 22347, 23640, 23843, 23890, 23978, 23978, 23977, 23959, 23875,
+      23842, 23425, 22812, 22393, 21856, 21562, 21206, 20964, 20891, 19785, 18641,
+    ].map(BigInt);
+
+    // Sanity-check the fixture itself before trusting the test built on
+    // it - this is what would fail loudly (not silently pass a
+    // meaningless test) if indicators.ts's own math ever changed under it.
+    const rsiCheck = actualIndicators.rsi(closesCents, 14).at(-1);
+    const smaCheck = actualIndicators.sma(closesCents, 50).at(-1);
+    expect(rsiCheck).not.toBeNull();
+    expect(smaCheck).not.toBeNull();
+    expect(rsiCheck!).toBeLessThan(30);
+    expect(Number(closesCents.at(-1))).toBeGreaterThan(smaCheck!);
+
+    vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+      new Map([["AAPL", closesCents.map((c) => bar(c, 1_000_000))]]),
+    );
+    vi.mocked(fetchQuotes).mockResolvedValue({
+      quotes: new Map([
+        [
+          "AAPL",
+          {
+            symbol: "AAPL",
+            bidCents: toCents("186.50"),
+            askCents: toCents("187.00"),
+            timestamp: new Date(),
+          },
+        ],
+      ]),
+      failedSymbols: [],
+    });
+
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+    const created = await createBotRun({
+      userId,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!created.ok) throw new Error("setup failed");
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsEntered).toBe(1);
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
+    expect(run?.status).toBe("holding");
+    expect(run?.selectedSymbol).toBe("AAPL");
+    // $1000.00 / $187.00 ask = floor(5.34...) = 5 shares.
+    expect(run?.entryQuantity).toBe(5);
+    expect(run?.entryTotalCents).toBe(toCents("935.00")); // 5 * $187.00
+
+    const runOrders = await db.select().from(orders).where(eq(orders.botRunId, created.runId));
+    const buyOrder = runOrders.find((order) => order.side === "buy");
+    expect(buyOrder?.status).toBe("filled");
+    expect(buyOrder?.type).toBe("market");
+    expect(buyOrder?.quantity).toBe(5);
+    expect(buyOrder?.filledPriceCents).toBe(toCents("187.00"));
+
+    const sellOrder = runOrders.find((order) => order.side === "sell");
+    expect(sellOrder?.status).toBe("pending");
+    expect(sellOrder?.type).toBe("limit");
+    expect(sellOrder?.quantity).toBe(5);
+    // ($935.00 entry + $50.00 target) / 5 shares = $197.00 exactly.
+    expect(sellOrder?.limitPriceCents).toBe(toCents("197.00"));
+
+    await assertLedgerBalances(account.id);
   });
 });
 
@@ -343,6 +460,67 @@ describe("runBotWorker - monitoring cycle", () => {
 
     const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
     expect(run?.status).toBe("closed_stop_loss");
+    expect(run?.realizedPnlCents).toBe(-toCents("40.00"));
+
+    await assertLedgerBalances(accountId);
+  });
+
+  // The other exit tests each make exactly one condition true, which
+  // proves that condition triggers correctly but doesn't touch the
+  // PRIORITY ordering at all - trivially, only one thing can fire when
+  // only one thing is true. This test is the one that actually exercises
+  // priority: stop-loss is hit AND RSI has independently recovered above
+  // the exit threshold, at the same moment, on the same cycle. The stated
+  // priority (stop-loss checked first) must win - if the priority order in
+  // monitorOneBotRun were ever accidentally reordered, this is the test
+  // that would catch it; the isolated single-condition tests would not.
+  it("resolves in favor of stop-loss when the rule's own RSI-recovery exit is ALSO true on the same cycle", async () => {
+    const userId = randomUUID();
+    const { runId, accountId, targetOrderId } = await createHoldingRun(
+      userId,
+      toCents("50.00"),
+      toCents("30.00"),
+    );
+
+    // Bid $96.00 -> stop-loss condition (-$40, past the $30 threshold).
+    vi.mocked(fetchQuotes).mockResolvedValue({
+      quotes: new Map([
+        [
+          "AAPL",
+          {
+            symbol: "AAPL",
+            bidCents: toCents("96.00"),
+            askCents: toCents("97.00"),
+            timestamp: new Date(),
+          },
+        ],
+      ]),
+      failedSymbols: [],
+    });
+    // RSI recovered above 50 -> the rule's own exit condition is ALSO true
+    // this same cycle, independently of price.
+    vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+      new Map([["AAPL", [bar(toCents("96.00"), 1_000_000)]]]),
+    );
+    vi.mocked(rsi).mockReturnValue([65]);
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsClosed).toBe(1);
+
+    const [cancelledTarget] = await db.select().from(orders).where(eq(orders.id, targetOrderId));
+    expect(cancelledTarget?.status).toBe("cancelled");
+
+    // Exactly one exit order, not two - confirms only one exit PATH acted,
+    // not that both conditions each independently tried to place a sell.
+    const exitOrders = await db
+      .select()
+      .from(orders)
+      .where(and(eq(orders.botRunId, runId), eq(orders.side, "sell"), eq(orders.type, "market")));
+    expect(exitOrders).toHaveLength(1);
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+    expect(run?.status).toBe("closed_stop_loss"); // not closed_rule_exit
     expect(run?.realizedPnlCents).toBe(-toCents("40.00"));
 
     await assertLedgerBalances(accountId);
@@ -461,6 +639,43 @@ describe("getBotRunsForAccount", () => {
 
     const runs = await getBotRunsForAccount(account.id);
     expect(runs.map((run) => run.id)).toEqual([second.runId, first.runId]);
+  });
+});
+
+describe("getActiveBotRunCount", () => {
+  it("counts only 'selecting' and 'holding' runs, not closed or failed ones", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    mockNoEligibleCandidates();
+    const stillSelecting = await createBotRun({
+      userId,
+      capitalCents: toCents("500.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("20.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("20.00") },
+    });
+    if (!stillSelecting.ok) throw new Error("setup failed");
+
+    await db.insert(botRuns).values({
+      accountId: account.id,
+      status: "closed_target",
+      ruleId: "rsi_pullback_uptrend_v1",
+      ruleParams: { rsiPeriod: 14 },
+      capitalCents: toCents("500.00"),
+      profitTargetType: "dollar",
+      profitTargetValueCents: toCents("20.00"),
+      stopLossType: "dollar",
+      stopLossValueCents: toCents("20.00"),
+      realizedPnlCents: toCents("20.00"),
+      closedAt: new Date(),
+    });
+
+    expect(await getActiveBotRunCount(account.id)).toBe(1);
+  });
+
+  it("is zero for an account with no bot runs at all", async () => {
+    const account = await getOrCreateAccount(randomUUID());
+    expect(await getActiveBotRunCount(account.id)).toBe(0);
   });
 });
 

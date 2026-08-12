@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { RSI_PULLBACK_UPTREND_V1_PARAMS, ruleShouldEnter, ruleShouldExit } from "./bot-rule";
+import {
+  RSI_PULLBACK_UPTREND_V1_PARAMS,
+  RSI_PULLBACK_UPTREND_V2_PARAMS,
+  ruleShouldEnter,
+  ruleShouldExit,
+} from "./bot-rule";
 import { toCents } from "./money";
 
 const params = RSI_PULLBACK_UPTREND_V1_PARAMS; // rsiEntry 30, rsiExit 50, sma period unused here
@@ -23,6 +28,42 @@ describe("ruleShouldEnter - RSI oversold within an uptrend", () => {
 
   it("treats the SMA comparison as strict (price exactly at the SMA does not enter)", () => {
     expect(ruleShouldEnter({ rsi: 25, price: toCents("100.00"), sma: 10000 }, params)).toBe(false);
+  });
+});
+
+// Only the entry-threshold DELTA between v1 and v2 needs coverage here -
+// the "falling knife" and SMA-strictness cases above already prove
+// ruleShouldEnter's generic behavior for any params object, v2's included,
+// so re-testing them against v2's numbers would just be the same
+// assertions with a different threshold, not new coverage. See
+// lib/trading/bot-rule.ts's ACTIVE_RULE_ID/PARAMS and STATE.md for why the
+// threshold moved from 30 to 40.
+describe("ruleShouldEnter - v2's raised entry threshold (40, not 30)", () => {
+  it("enters at RSI 35, which v1 would reject but v2 accepts", () => {
+    expect(ruleShouldEnter({ rsi: 35, price: toCents("105.00"), sma: 10000 }, params)).toBe(false);
+    expect(
+      ruleShouldEnter(
+        { rsi: 35, price: toCents("105.00"), sma: 10000 },
+        RSI_PULLBACK_UPTREND_V2_PARAMS,
+      ),
+    ).toBe(true);
+  });
+
+  it("treats v2's entry threshold as strict (RSI exactly at 40 does not enter)", () => {
+    expect(
+      ruleShouldEnter(
+        { rsi: 40, price: toCents("105.00"), sma: 10000 },
+        RSI_PULLBACK_UPTREND_V2_PARAMS,
+      ),
+    ).toBe(false);
+  });
+
+  it("leaves everything else (SMA period, exit threshold, RSI period) unchanged from v1", () => {
+    expect(RSI_PULLBACK_UPTREND_V2_PARAMS).toMatchObject({
+      rsiPeriod: params.rsiPeriod,
+      rsiExitThreshold: params.rsiExitThreshold,
+      smaPeriod: params.smaPeriod,
+    });
   });
 });
 
