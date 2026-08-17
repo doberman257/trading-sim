@@ -8,6 +8,7 @@ import { PendingOrdersPanel } from "@/components/PendingOrdersPanel";
 import { PortfolioAllocation } from "@/components/PortfolioAllocation";
 import { PositionsPanel } from "@/components/PositionsPanel";
 import { RecentOrdersPanel } from "@/components/RecentOrdersPanel";
+import { ResetAccountButton } from "@/components/ResetAccountButton";
 import { SummaryPanel } from "@/components/SummaryPanel";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getBotRunsForAccount } from "@/lib/db/bot-runs";
@@ -158,6 +159,7 @@ export default async function DashboardPage() {
           />
         </div>
         <BotStatsPanel stats={botRuleStats} />
+        <ResetAccountButton />
       </div>
     </main>
   );
