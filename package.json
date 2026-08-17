@@ -17,6 +17,7 @@
     "check-db": "tsx scripts/check-db.ts",
     "check-node-engine": "tsx scripts/check-node-engine.ts",
     "sync-assets": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/sync-assets.ts",
+    "curate-bot-watchlist": "cross-env NODE_OPTIONS=--conditions=react-server tsx scripts/curate-bot-watchlist.ts",
     "apply-migration": "tsx scripts/apply-migration.ts",
     "db:push": "drizzle-kit push",
     "db:push:test": "drizzle-kit push --config drizzle.test.config.ts",

@@ -411,17 +411,96 @@ const AlpacaMultiBarsResponseSchema = z.object({
 
 const SPARKLINE_LOOKBACK_DAYS = 30;
 
-// One request for many symbols' daily bars, using Alpaca's multi-symbol
-// bars endpoint - the same batching this file already does for quotes
-// (fetchQuotes), applied here so a watchlist or positions list with N
-// symbols costs one network call, not N. Built for sparklines specifically
-// (see components/Sparkline.tsx): a short, fixed lookback, not the full
-// chart's 90 days.
+// Confirmed empirically against the real endpoint, not assumed: `limit=10000`
+// succeeds, `limit=10001` 400s with "invalid limit: larger than the allowed
+// maximum of 10000" - this is Alpaca's own hard ceiling on this endpoint,
+// not a conservative choice made up for this app. The limit caps the TOTAL
+// bars across every symbol in one request, not per symbol (confirmed
+// separately - a `limit` smaller than that total silently returns only the
+// first symbols' bars and drops the rest, with no error), which is exactly
+// what makes a large symbol count matter here even though the per-symbol
+// lookback itself is short.
+const ALPACA_MULTI_BARS_LIMIT_MAX = 10000;
+
+// How many symbols can share one request without risking the silent-
+// truncation failure mode above. Chunking on calendar lookbackDays (not the
+// smaller true trading-day count) is deliberately conservative - trading
+// days are always <= calendar days, so this always stays under the real cap
+// even though it under-fills each chunk slightly. Found this the hard way:
+// this function worked fine at the original 12-symbol bot watchlist
+// (12 * ~70 trading days over a 100-day lookback is ~840 bars, nowhere near
+// 10,000) and silently returned only 150 of 517 symbols the moment the
+// watchlist was expanded - same failure mode as the comment above describes,
+// just never triggered until a caller's symbol count grew enough to hit it.
+function maxSymbolsPerBarsChunk(lookbackDays: number): number {
+  return Math.max(1, Math.floor(ALPACA_MULTI_BARS_LIMIT_MAX / lookbackDays));
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function fetchDailyBarsChunk(
+  symbols: readonly string[],
+  lookbackDays: number,
+  headers: Record<string, string>,
+): Promise<Map<string, Bar[]>> {
+  const end = new Date();
+  const start = new Date(end.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  const symbolsParam = symbols.map(encodeURIComponent).join(",");
+
+  const url =
+    `${ALPACA_QUOTE_URL}/bars?symbols=${symbolsParam}&timeframe=1Day` +
+    `&start=${start.toISOString()}&end=${end.toISOString()}&limit=${ALPACA_MULTI_BARS_LIMIT_MAX}&feed=iex`;
+
+  try {
+    const response = await fetch(url, { headers, cache: "no-store" });
+    if (!response.ok) {
+      return new Map();
+    }
+
+    const body: unknown = await response.json();
+    const parsed = AlpacaMultiBarsResponseSchema.parse(body);
+
+    const result = new Map<string, Bar[]>();
+    for (const symbol of symbols) {
+      const bars = parsed.bars[symbol];
+      if (bars) {
+        result.set(
+          symbol,
+          bars.map((bar) => toBar(bar)),
+        );
+      }
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
+}
+
+// One or more requests for many symbols' daily bars, using Alpaca's
+// multi-symbol bars endpoint - the same batching this file already does for
+// quotes (fetchQuotes), applied here so a watchlist or positions list with N
+// symbols costs a handful of network calls, not N. Originally built for
+// sparklines (see components/Sparkline.tsx: a short, fixed lookback, not the
+// full chart's 90 days) and later reused by the bot's selection cycle
+// (lib/db/bot-runs.ts) with a much larger symbol count - which is what
+// surfaced the need for the chunking above.
 //
-// Soft-fails to an empty map on any error, same as fetchQuotes and for the
-// same reason - a sparkline is decorative context, not something a page
-// should break over. `feed=iex` is required for the same reason as
-// fetchBars (the default feed 403s on recent-day ranges).
+// Symbols are split into chunks that each stay under Alpaca's real
+// ALPACA_MULTI_BARS_LIMIT_MAX, fetched concurrently (Promise.all - even the
+// bot's full ~517-symbol watchlist at its 100-day lookback is only a
+// handful of chunks, nowhere near the 200 req/min rate limit Alpaca's own
+// response headers report), and merged into one map. Each chunk soft-fails
+// to contributing no symbols on its own error, same as fetchQuotes and for
+// the same reason - one bad chunk (or the whole call, when there's only
+// one) shouldn't make an otherwise-successful fetch look like a total
+// failure. `feed=iex` is required for the same reason as fetchBars (the
+// default feed 403s on recent-day ranges).
 export async function fetchDailyBarsForSymbols(
   symbols: string[],
   lookbackDays: number = SPARKLINE_LOOKBACK_DAYS,
@@ -439,48 +518,17 @@ export async function fetchDailyBarsForSymbols(
     throw new Error("Missing ALPACA_KEY_ID or ALPACA_SECRET_KEY environment variables");
   }
 
-  const end = new Date();
-  const start = new Date(end.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
-  const symbolsParam = uniqueSymbols.map(encodeURIComponent).join(",");
+  const headers = { "APCA-API-KEY-ID": keyId, "APCA-API-SECRET-KEY": secretKey };
+  const chunks = chunk(uniqueSymbols, maxSymbolsPerBarsChunk(lookbackDays));
+  const chunkResults = await Promise.all(
+    chunks.map((chunkSymbols) => fetchDailyBarsChunk(chunkSymbols, lookbackDays, headers)),
+  );
 
-  const url =
-    `${ALPACA_QUOTE_URL}/bars?symbols=${symbolsParam}&timeframe=1Day` +
-    // A generous fixed cap, not `lookbackDays * uniqueSymbols.length`: this
-    // endpoint's `limit` caps the TOTAL bars across every symbol in the
-    // response, not per symbol - confirmed empirically (a `limit` smaller
-    // than that total silently returned only the first symbol's bars and
-    // dropped the rest, with no error). 10,000 comfortably covers a 30-day
-    // window across a watchlist far larger than this app's UI supports.
-    `&start=${start.toISOString()}&end=${end.toISOString()}&limit=10000&feed=iex`;
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "APCA-API-KEY-ID": keyId,
-        "APCA-API-SECRET-KEY": secretKey,
-      },
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return new Map();
+  const result = new Map<string, Bar[]>();
+  for (const chunkResult of chunkResults) {
+    for (const [symbol, bars] of chunkResult) {
+      result.set(symbol, bars);
     }
-
-    const body: unknown = await response.json();
-    const parsed = AlpacaMultiBarsResponseSchema.parse(body);
-
-    const result = new Map<string, Bar[]>();
-    for (const symbol of uniqueSymbols) {
-      const bars = parsed.bars[symbol];
-      if (bars) {
-        result.set(
-          symbol,
-          bars.map((bar) => toBar(bar)),
-        );
-      }
-    }
-    return result;
-  } catch {
-    return new Map();
   }
+  return result;
 }

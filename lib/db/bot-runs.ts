@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { fetchDailyBarsForSymbols, fetchQuotes, type Bar } from "../market/alpaca";
-import { BOT_WATCHLIST_SYMBOLS } from "../market/popular-symbols";
+import { BOT_WATCHLIST_SYMBOLS } from "../market/bot-watchlist";
 import { isApproachingMarketClose } from "../trading/bot-day-expiry";
 import { computeBotRunRealizedPnl } from "../trading/bot-pnl";
 import { ACTIVE_RULE_ID, ACTIVE_RULE_PARAMS, ruleShouldExit } from "../trading/bot-rule";
