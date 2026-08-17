@@ -76,7 +76,7 @@ Placing a limit order works without this - it just sits `pending` forever until 
 
 Same secret as step 7 above - `POST /api/worker/bot-runs` (`app/api/worker/bot-runs/route.ts`) is authorized by the exact same `LIMIT_ORDER_WORKER_SECRET`, not a second one, so no new secret to generate if you've already done step 7.
 
-`.github/workflows/bot-worker.yml` calls `POST {WORKER_URL}/api/worker/bot-runs` with that same bearer token. Unlike the limit-order worker's workflow, **this one is `workflow_dispatch` only - it has no `schedule:` trigger at all.** Trigger it by hand from this repository's Actions tab → "Bot worker" → "Run workflow" whenever you want a selection/monitoring cycle to run. A worker that can place real (paper) trades unattended shouldn't run on autopilot before a real live-market entry/exit cycle has been manually verified - adding a schedule here is a deliberate, separate, later decision, not something this step does for you.
+`.github/workflows/bot-worker.yml` calls `POST {WORKER_URL}/api/worker/bot-runs` every 5 minutes with that same bearer token, same cadence as the limit-order worker - a real manual `workflow_dispatch` run was verified first (a real 200, correct evaluation across the full watchlist) before the schedule was added. It can still be triggered by hand from this repository's Actions tab → "Bot worker" → "Run workflow" for a spot-check outside the regular cadence.
 
 ## Commands
 
