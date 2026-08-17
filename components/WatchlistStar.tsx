@@ -38,7 +38,10 @@ export function WatchlistStar({ symbol, initialWatched }: WatchlistStarProps) {
       disabled={isPending}
       aria-pressed={watched}
       aria-label={watched ? `Remove ${symbol} from watchlist` : `Add ${symbol} to watchlist`}
-      className={`text-base leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+      // text-[1rem], not text-base: --color-base makes text-base ambiguous
+      // between font-size and color (see globals.css), and the color
+      // meaning was winning, rendering the star in the page-background color.
+      className={`text-[1rem] leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         watched ? "text-accent" : "text-muted hover:text-fg"
       }`}
     >

@@ -96,6 +96,24 @@ describe("searchAssets", () => {
     expect(results.map((r) => r.symbol)).toEqual(["INTC", "AIFD", "AIO"]);
   });
 
+  // The real bug found on the live production search: "Intel" is itself a
+  // *prefix* of other company names (Intellicheck, Intelligent Bio
+  // Solutions), so all four landed in the undifferentiated name-prefix tier
+  // and alphabetical-by-symbol sorting buried INTC (Intel Corporation, a
+  // genuine whole-word match) behind IDN/INBS/INLX.
+  it("ranks a whole-word name match above a name that merely has the query as a prefix of a longer word", async () => {
+    await seedAssets([
+      { symbol: "IDN", name: "Intellicheck Inc Common Stock" },
+      { symbol: "INBS", name: "Intelligent Bio Solutions Inc Common Stock" },
+      { symbol: "INLX", name: "Intellinetics Inc Common Stock" },
+      { symbol: "INTC", name: "Intel Corporation Common Stock" },
+    ]);
+
+    const results = await searchAssets("intel");
+
+    expect(results.map((r) => r.symbol)).toEqual(["INTC", "IDN", "INBS", "INLX"]);
+  });
+
   it("still ranks a symbol match above a name-prefix match", async () => {
     await seedAssets([
       { symbol: "INTC", name: "Intel Corporation Common Stock" },

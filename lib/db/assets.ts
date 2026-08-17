@@ -184,6 +184,14 @@ export async function searchAssets(query: string): Promise<AssetSearchResult[]> 
   const pattern = `%${trimmed}%`;
   const prefixPattern = `${trimmed}%`;
   const upperTrimmed = trimmed.toUpperCase();
+  // Name starts with the query as a whole word (followed by a space, a
+  // comma, or nothing) - "Intel Corporation" and "Intel" both match,
+  // "Intellicheck" doesn't. Three ILIKE patterns rather than a regex, to
+  // stay consistent with the rest of this function's wildcard-based
+  // matching instead of introducing a second matching mechanism.
+  const wordExact = trimmed;
+  const wordPrefixSpace = `${trimmed} %`;
+  const wordPrefixComma = `${trimmed},%`;
 
   const rows = await db
     .select({ symbol: assets.symbol, name: assets.name, exchange: assets.exchange })
@@ -194,13 +202,13 @@ export async function searchAssets(query: string): Promise<AssetSearchResult[]> 
         or(ilike(assets.symbol, pattern), ilike(assets.name, pattern)),
       ),
     )
-    // Exact symbol match, then symbol-prefix match, then name-prefix match,
-    // then everything else alphabetically. The name-prefix tier is what
-    // makes searching "intel" actually surface Intel Corporation - without
-    // it, a real, confirmed case (verified against the live asset table,
-    // not hypothesized): "intel" is also a mid-word substring of
-    // "intelligence", and this table has ~30 tradable "Artificial
-    // Intelligence"-branded funds. Those all fall into the same
+    // Exact symbol match, then symbol-prefix match, then name-word-exact
+    // match, then name-prefix match, then everything else alphabetically.
+    // The name-prefix tier is what makes searching "intel" actually surface
+    // Intel Corporation - without it, a real, confirmed case (verified
+    // against the live asset table, not hypothesized): "intel" is also a
+    // mid-word substring of "intelligence", and this table has ~30 tradable
+    // "Artificial Intelligence"-branded funds. Those all fall into the same
     // undifferentiated "name contains it somewhere" tier a plain
     // name-substring match would use, and alphabetical-by-symbol sorting
     // within that tier put every one of them ahead of INTC (whose name
@@ -211,12 +219,24 @@ export async function searchAssets(query: string): Promise<AssetSearchResult[]> 
     // better signal than "the query appears somewhere in the name" and
     // earns its own tier above it, the same way a symbol-prefix match
     // already does over a bare symbol-substring match.
+    //
+    // The name-prefix tier alone still wasn't enough: "Intel" is itself a
+    // *prefix* of other company names ("Intellicheck", "Intelligent Bio
+    // Solutions"), so all of them land in the same tier as "Intel
+    // Corporation" and alphabetical-by-symbol sorting again buries INTC
+    // behind IDN/INBS/INLX. The word-exact tier above it distinguishes "the
+    // query as a whole word" from "the query as a prefix of a longer word" -
+    // "Intel Corporation" and bare "Intel" match, "Intellicheck" doesn't -
+    // without needing any market-cap/prominence data this table doesn't have.
     .orderBy(
       sql`case
         when ${assets.symbol} = ${upperTrimmed} then 0
         when ${assets.symbol} ilike ${prefixPattern} then 1
-        when ${assets.name} ilike ${prefixPattern} then 2
-        else 3
+        when ${assets.name} ilike ${wordExact} then 2
+        when ${assets.name} ilike ${wordPrefixSpace} then 2
+        when ${assets.name} ilike ${wordPrefixComma} then 2
+        when ${assets.name} ilike ${prefixPattern} then 3
+        else 4
       end`,
       assets.symbol,
     )

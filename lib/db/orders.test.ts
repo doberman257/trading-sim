@@ -11,6 +11,7 @@ import {
   cancelOrder,
   getFilledOrdersForSymbol,
   getOrdersForAccount,
+  getOrdersForSymbol,
   placeLimitOrder,
   placeMarketOrder,
 } from "./orders";
@@ -639,6 +640,51 @@ describe("getFilledOrdersForSymbol", () => {
     const account = await getOrCreateAccount(randomUUID());
 
     expect(await getFilledOrdersForSymbol(account.id, "AAPL")).toEqual([]);
+  });
+});
+
+describe("getOrdersForSymbol", () => {
+  it("returns every status for that symbol, newest first, and excludes other symbols", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    mockQuote({ symbol: "AAPL", askCents: toCents("100.00"), bidCents: toCents("99.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 10 });
+
+    const placedLimit = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "sell",
+      quantity: 3,
+      limitPriceCents: toCents("150.00"),
+    });
+    if (!placedLimit.ok) throw new Error("setup failed");
+    const cancelResult = await cancelOrder(userId, placedLimit.orderId);
+    expect(cancelResult).toEqual({ ok: true });
+
+    // A rejected order for AAPL and a filled order for a different symbol -
+    // the rejected one should still show up, the other symbol shouldn't.
+    mockQuote({ symbol: "AAPL", askCents: toCents("1000000.00") });
+    await placeMarketOrder({ userId, symbol: "AAPL", side: "buy", quantity: 1 });
+    mockQuote({ symbol: "TSLA", askCents: toCents("200.00"), bidCents: toCents("199.00") });
+    await placeMarketOrder({ userId, symbol: "TSLA", side: "buy", quantity: 1 });
+
+    const rows = await getOrdersForSymbol(account.id, "AAPL");
+
+    expect(rows.map((r) => r.status)).toEqual(["rejected", "cancelled", "filled"]);
+    expect(rows[2]).toMatchObject({
+      side: "buy",
+      quantity: 10,
+      filledPriceCents: toCents("100.00"),
+    });
+    expect(rows[1]).toMatchObject({ side: "sell", quantity: 3, filledPriceCents: null });
+    expect(rows[0]).toMatchObject({ side: "buy", quantity: 1, filledPriceCents: null });
+  });
+
+  it("returns an empty list for a symbol with no orders", async () => {
+    const account = await getOrCreateAccount(randomUUID());
+
+    expect(await getOrdersForSymbol(account.id, "AAPL")).toEqual([]);
   });
 });
 

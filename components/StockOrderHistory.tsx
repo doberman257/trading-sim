@@ -1,4 +1,6 @@
+import { OrderStatusBadge } from "./OrderStatusBadge";
 import { formatOrderTimestamp } from "./RecentOrdersPanel";
+import type { OrderStatus } from "@/lib/db/portfolio";
 import { formatCents } from "@/lib/trading/money";
 import type { Side } from "@/lib/trading/types";
 
@@ -6,19 +8,23 @@ export type StockOrderHistoryItem = {
   id: string;
   side: Side;
   quantity: number;
-  filledPriceCents: bigint;
-  filledAt: Date;
+  status: OrderStatus;
+  filledPriceCents: bigint | null;
+  createdAt: Date;
 };
 
 export type StockOrderHistoryProps = {
-  fills: StockOrderHistoryItem[];
+  orders: StockOrderHistoryItem[];
 };
 
-// No Status column, unlike RecentOrdersPanel: every row here is already a
-// fill (see getFilledOrdersForSymbol) - a rejected or still-pending order
-// has nothing to show on a per-symbol history list. No Symbol column either
-// - it's implicitly this page's own symbol on every row.
-export function StockOrderHistory({ fills }: StockOrderHistoryProps) {
+// Every order for this symbol regardless of status (pending/filled/
+// cancelled/rejected/expired), not just fills - a tab literally named
+// "Orders" should show a cancellation for this symbol, not just make the
+// user go find it in the dashboard's global feed. Time uses createdAt for
+// every row, not filledAt (null for anything but a fill) - matching
+// RecentOrdersPanel's own convention. No Symbol column - it's implicitly
+// this page's own symbol on every row.
+export function StockOrderHistory({ orders }: StockOrderHistoryProps) {
   const now = new Date();
 
   return (
@@ -27,9 +33,9 @@ export function StockOrderHistory({ fills }: StockOrderHistoryProps) {
         <h2 className="text-fg text-sm font-medium">Order history</h2>
       </header>
       <div className="p-4">
-        {fills.length === 0 ? (
+        {orders.length === 0 ? (
           <p className="text-muted py-6 text-center text-sm">
-            No orders filled for this symbol yet.
+            No orders placed for this symbol yet.
           </p>
         ) : (
           <>
@@ -52,6 +58,12 @@ export function StockOrderHistory({ fills }: StockOrderHistoryProps) {
                   </th>
                   <th
                     scope="col"
+                    className="text-muted px-3 py-2 text-left text-xs font-normal tracking-wide uppercase"
+                  >
+                    Status
+                  </th>
+                  <th
+                    scope="col"
                     className="text-muted px-3 py-2 text-right text-xs font-normal tracking-wide uppercase"
                   >
                     Fill price
@@ -65,22 +77,27 @@ export function StockOrderHistory({ fills }: StockOrderHistoryProps) {
                 </tr>
               </thead>
               <tbody>
-                {fills.map((fill) => (
+                {orders.map((order) => (
                   <tr
-                    key={fill.id}
+                    key={order.id}
                     className="border-default/50 hover:bg-elevated border-b transition-colors"
                   >
                     {/* Not gain/loss colored: buy/sell side isn't itself a
                         financial direction - see RecentOrdersPanel's own note. */}
-                    <td className="text-fg px-3 py-2.5 capitalize">{fill.side}</td>
+                    <td className="text-fg px-3 py-2.5 capitalize">{order.side}</td>
                     <td className="text-fg px-3 py-2.5 text-right font-mono tabular-nums">
-                      {fill.quantity}
+                      {order.quantity}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <OrderStatusBadge status={order.status} />
                     </td>
                     <td className="text-fg px-3 py-2.5 text-right font-mono tabular-nums">
-                      ${formatCents(fill.filledPriceCents)}
+                      {order.filledPriceCents !== null
+                        ? `$${formatCents(order.filledPriceCents)}`
+                        : "—"}
                     </td>
                     <td className="text-muted px-3 py-2.5 text-xs">
-                      {formatOrderTimestamp(fill.filledAt, now)}
+                      {formatOrderTimestamp(order.createdAt, now)}
                     </td>
                   </tr>
                 ))}
@@ -88,22 +105,28 @@ export function StockOrderHistory({ fills }: StockOrderHistoryProps) {
             </table>
 
             <div className="flex flex-col gap-2 lg:hidden">
-              {fills.map((fill) => (
-                <div key={fill.id} className="border-default bg-elevated rounded-md border p-3">
+              {orders.map((order) => (
+                <div key={order.id} className="border-default bg-elevated rounded-md border p-3">
                   <div className="mb-2 flex items-center justify-between">
-                    <span className="text-fg font-medium capitalize">{fill.side}</span>
-                    <span className="text-muted text-xs">
-                      {formatOrderTimestamp(fill.filledAt, now)}
-                    </span>
+                    <span className="text-fg font-medium capitalize">{order.side}</span>
+                    <OrderStatusBadge status={order.status} />
                   </div>
                   <div className="flex items-center justify-between py-1">
                     <span className="text-muted text-xs">Qty</span>
-                    <span className="text-fg font-mono text-sm tabular-nums">{fill.quantity}</span>
+                    <span className="text-fg font-mono text-sm tabular-nums">{order.quantity}</span>
                   </div>
                   <div className="flex items-center justify-between py-1">
                     <span className="text-muted text-xs">Fill price</span>
                     <span className="text-fg font-mono text-sm tabular-nums">
-                      ${formatCents(fill.filledPriceCents)}
+                      {order.filledPriceCents !== null
+                        ? `$${formatCents(order.filledPriceCents)}`
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-muted text-xs">Time</span>
+                    <span className="text-muted text-xs">
+                      {formatOrderTimestamp(order.createdAt, now)}
                     </span>
                   </div>
                 </div>
