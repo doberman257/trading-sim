@@ -27,7 +27,7 @@ import {
   getPendingLimitOrdersForAccount,
   recordFillTransaction,
 } from "./orders";
-import { accounts, botRuns, orders } from "./schema";
+import { accounts, botRuns, botWorkerRuns, orders } from "./schema";
 
 // Comfortably covers SMA(50)'s ~70-calendar-day need (an estimate scaled
 // from this app's own empirically-confirmed 20-trading-day/~30-calendar-day
@@ -241,23 +241,73 @@ export type BotWorkerOutcome = { ok: true; counts: BotWorkerCounts } | { ok: fal
 // discipline as runLimitOrderWorker: every decision below is a function of
 // current state (each run's own status under its own lock, a fresh
 // bars+quotes fetch), never of when this last ran.
+//
+// Records a bot_worker_runs row for every invocation, same insert-then-
+// update pattern as runLimitOrderWorker - including when both cycles find
+// nothing to do (selection/monitoring counts of zero are still a real,
+// recorded fact: "the worker ran and found nothing," distinguishable from
+// "the worker didn't run" only because this row exists at all). Purely an
+// observability addition wrapped around the two cycles - neither
+// runSelectionCycle nor runMonitoringCycle's own logic changes.
 export async function runBotWorker(now: Date): Promise<BotWorkerOutcome> {
+  const [run] = await db.insert(botWorkerRuns).values({}).returning({ id: botWorkerRuns.id });
+
+  if (!run) {
+    throw new Error("Failed to record a new bot_worker_runs row");
+  }
+
   try {
     const selection = await runSelectionCycle(now);
     const monitoring = await runMonitoringCycle(now);
-    return {
-      ok: true,
-      counts: {
-        runsConsideredForSelection: selection.considered,
-        runsEntered: selection.entered,
-        runsFailedNoAffordableCandidate: selection.failedNoAffordableCandidate,
-        runsMonitored: monitoring.monitored,
-        runsClosed: monitoring.closed,
-      },
+    const counts: BotWorkerCounts = {
+      runsConsideredForSelection: selection.considered,
+      runsEntered: selection.entered,
+      runsFailedNoAffordableCandidate: selection.failedNoAffordableCandidate,
+      runsMonitored: monitoring.monitored,
+      runsClosed: monitoring.closed,
     };
+
+    await db
+      .update(botWorkerRuns)
+      .set({ status: "succeeded", finishedAt: new Date(), ...counts })
+      .where(eq(botWorkerRuns.id, run.id));
+
+    return { ok: true, counts };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    const message = error instanceof Error ? error.message : String(error);
+    await db
+      .update(botWorkerRuns)
+      .set({ status: "failed", finishedAt: new Date(), errorMessage: message })
+      .where(eq(botWorkerRuns.id, run.id));
+
+    return { ok: false, error: message };
   }
+}
+
+export type LastBotWorkerRun = {
+  startedAt: Date;
+  finishedAt: Date | null;
+  status: "running" | "succeeded" | "failed";
+  runsConsideredForSelection: number | null;
+  runsEntered: number | null;
+  runsFailedNoAffordableCandidate: number | null;
+  runsMonitored: number | null;
+  runsClosed: number | null;
+  errorMessage: string | null;
+};
+
+// The most recent invocation in ANY state, not just the last successful one
+// - same reasoning as getLastLimitOrderWorkerRun: a stuck "running" row or a
+// string of failures is exactly what app/api/worker/bot-status/route.ts
+// exists to surface, so filtering to "succeeded" here would hide it.
+export async function getLastBotWorkerRun(): Promise<LastBotWorkerRun | null> {
+  const [latest] = await db
+    .select()
+    .from(botWorkerRuns)
+    .orderBy(desc(botWorkerRuns.startedAt))
+    .limit(1);
+
+  return latest ?? null;
 }
 
 async function runSelectionCycle(

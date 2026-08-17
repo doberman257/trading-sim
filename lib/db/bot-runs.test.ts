@@ -9,7 +9,13 @@ import { isMarketOpen } from "../trading/market-hours";
 import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
-import { createBotRun, getActiveBotRunCount, getBotRunsForAccount, runBotWorker } from "./bot-runs";
+import {
+  createBotRun,
+  getActiveBotRunCount,
+  getBotRunsForAccount,
+  getLastBotWorkerRun,
+  runBotWorker,
+} from "./bot-runs";
 import { db, poolMax } from "./client";
 import { runLimitOrderWorker } from "./limit-order-worker";
 import { cancelOrderByAccountId } from "./orders";
@@ -98,7 +104,7 @@ beforeEach(async () => {
   vi.mocked(rsi).mockReset();
   vi.mocked(sma).mockReset();
   await db.execute(
-    sql`truncate table transactions, orders, positions, bot_runs, accounts, limit_order_worker_runs cascade`,
+    sql`truncate table transactions, orders, positions, bot_runs, accounts, limit_order_worker_runs, bot_worker_runs cascade`,
   );
 });
 
@@ -614,6 +620,92 @@ describe("runBotWorker - monitoring cycle", () => {
 
     const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
     expect(run?.status).toBe("holding");
+  });
+});
+
+describe("runBotWorker - invocation logging", () => {
+  // The whole point of this table: distinguishing "the worker ran and
+  // found nothing to do" from "the worker didn't run at all" - both looked
+  // identical from inside this app before it existed, since neither
+  // runSelectionCycle nor runMonitoringCycle wrote anything when there was
+  // no active bot_runs row to act on.
+  it("records a run even when there are no selecting/holding bot_runs to act on", async () => {
+    const before = new Date();
+
+    const outcome = await runBotWorker(new Date());
+
+    expect(outcome).toEqual({
+      ok: true,
+      counts: {
+        runsConsideredForSelection: 0,
+        runsEntered: 0,
+        runsFailedNoAffordableCandidate: 0,
+        runsMonitored: 0,
+        runsClosed: 0,
+      },
+    });
+
+    const lastRun = await getLastBotWorkerRun();
+    expect(lastRun?.status).toBe("succeeded");
+    expect(lastRun?.startedAt.getTime()).toBeGreaterThanOrEqual(before.getTime());
+    expect(lastRun?.finishedAt).not.toBeNull();
+    expect(lastRun).toMatchObject({
+      runsConsideredForSelection: 0,
+      runsEntered: 0,
+      runsFailedNoAffordableCandidate: 0,
+      runsMonitored: 0,
+      runsClosed: 0,
+      errorMessage: null,
+    });
+  });
+
+  it("records the real counts from a successful invocation, matching what the route itself returns", async () => {
+    const userId = randomUUID();
+    await createBotRun({
+      userId,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    mockEligibleCandidate();
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsEntered).toBe(1);
+
+    const lastRun = await getLastBotWorkerRun();
+    expect(lastRun).toMatchObject({
+      status: "succeeded",
+      runsConsideredForSelection: outcome.counts.runsConsideredForSelection,
+      runsEntered: outcome.counts.runsEntered,
+      runsFailedNoAffordableCandidate: outcome.counts.runsFailedNoAffordableCandidate,
+      runsMonitored: outcome.counts.runsMonitored,
+      runsClosed: outcome.counts.runsClosed,
+    });
+  });
+
+  it("marks the run failed with the real error message when a cycle throws", async () => {
+    const userId = randomUUID();
+    await createBotRun({
+      userId,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    // A selecting run must exist for runSelectionCycle to reach the Alpaca
+    // calls at all (it short-circuits before them otherwise) - see the test
+    // above.
+    vi.mocked(fetchDailyBarsForSymbols).mockRejectedValue(new Error("Alpaca is down"));
+    vi.mocked(fetchQuotes).mockResolvedValue({ quotes: new Map(), failedSymbols: [] });
+
+    const outcome = await runBotWorker(new Date());
+
+    expect(outcome).toEqual({ ok: false, error: "Alpaca is down" });
+
+    const lastRun = await getLastBotWorkerRun();
+    expect(lastRun?.status).toBe("failed");
+    expect(lastRun?.errorMessage).toBe("Alpaca is down");
+    expect(lastRun?.finishedAt).not.toBeNull();
   });
 });
 
