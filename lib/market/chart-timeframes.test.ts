@@ -4,6 +4,7 @@ import {
   CHART_RANGES,
   isValidTimeframeForRange,
   nearestValidTimeframe,
+  timeframeIncompatibilityReason,
 } from "./chart-timeframes";
 
 describe("isValidTimeframeForRange", () => {
@@ -33,6 +34,23 @@ describe("isValidTimeframeForRange", () => {
     for (const range of CHART_RANGES) {
       expect(allowedTimeframesForRange(range).length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("timeframeIncompatibilityReason", () => {
+  it("returns null for a valid combination", () => {
+    expect(timeframeIncompatibilityReason("1Y", "1Day")).toBeNull();
+  });
+
+  it("says too-many-bars when the timeframe is finer than everything the range allows", () => {
+    expect(timeframeIncompatibilityReason("1Y", "15Min")).toBe("too-many-bars");
+    expect(timeframeIncompatibilityReason("3M", "15Min")).toBe("too-many-bars");
+  });
+
+  it("says too-few-bars when the timeframe is coarser than everything the range allows", () => {
+    // The exact bug reported in production: 1Week bars over a 1W range
+    // (~1 bar) were disabled with a "too many bars" message, backwards.
+    expect(timeframeIncompatibilityReason("1W", "1Week")).toBe("too-few-bars");
   });
 });
 

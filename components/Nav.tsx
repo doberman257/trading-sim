@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { logout } from "@/app/(auth)/actions";
+import { UserMenu } from "./UserMenu";
 
 export type NavProps = {
   userEmail: string;
+  activeBotRunCount: number;
 };
 
 const LINKS = [
@@ -23,7 +24,7 @@ function isLinkActive(pathname: string, href: string): boolean {
   return pathname.startsWith(href);
 }
 
-export function Nav({ userEmail }: NavProps) {
+export function Nav({ userEmail, activeBotRunCount }: NavProps) {
   const pathname = usePathname();
 
   return (
@@ -44,14 +45,7 @@ export function Nav({ userEmail }: NavProps) {
             </Link>
           ))}
         </nav>
-        <div className="flex items-center gap-3">
-          <span className="text-muted text-xs">{userEmail}</span>
-          <form action={logout}>
-            <button type="submit" className="text-muted hover:text-fg text-xs transition-colors">
-              Sign out
-            </button>
-          </form>
-        </div>
+        <UserMenu userEmail={userEmail} activeBotRunCount={activeBotRunCount} />
       </div>
     </header>
   );

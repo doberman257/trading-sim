@@ -21,6 +21,7 @@ import {
   isValidTimeframeForRange,
   nearestValidTimeframe,
   TIMEFRAME_ORDER,
+  timeframeIncompatibilityReason,
   type ChartRange,
 } from "@/lib/market/chart-timeframes";
 import { DEFAULT_RSI_PERIOD, ema, rsi, sma } from "@/lib/trading/indicators";
@@ -262,6 +263,12 @@ export function StockChart({
     const chart = createChart(container, {
       width: container.clientWidth,
       height: totalHeight,
+      // Without this, the time-axis tick formatter falls back to the
+      // browser's own navigator.language, which produces mixed-language
+      // labels (e.g. "Sep, Nov, 2026, Mär, Mai, Jul" on a 1Y range) whenever
+      // that resolves inconsistently across ticks. Force it to match the
+      // rest of the app, which is English-only.
+      localization: { locale: "en-US" },
       layout: {
         background: { color: "transparent" },
         textColor: muted,
@@ -553,17 +560,21 @@ export function StockChart({
           <div className="flex gap-0.5">
             {TIMEFRAME_ORDER.map((tf) => {
               const disabled = !isValidTimeframeForRange(range, tf);
+              let title: string | undefined;
+              if (disabled) {
+                const reason =
+                  timeframeIncompatibilityReason(range, tf) === "too-few-bars"
+                    ? "too few bars to be useful"
+                    : "too many bars to be useful";
+                title = `${TIMEFRAME_LABELS[tf]} bars aren't shown over a ${range} range - ${reason}`;
+              }
               return (
                 <button
                   key={tf}
                   type="button"
                   disabled={disabled}
                   onClick={() => setTimeframe(tf)}
-                  title={
-                    disabled
-                      ? `${TIMEFRAME_LABELS[tf]} bars aren't shown over a ${range} range - too many bars to be useful`
-                      : undefined
-                  }
+                  title={title}
                   className={segmentedButtonClassName(tf === timeframe, disabled)}
                 >
                   {TIMEFRAME_LABELS[tf]}
@@ -634,6 +645,14 @@ export function StockChart({
         </div>
       ) : (
         <div className={`relative ${isLoading ? "opacity-60" : ""}`}>
+          {isLoading && (
+            <div
+              className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center"
+              aria-hidden
+            >
+              <div className="border-subtle border-t-accent size-6 animate-spin rounded-full border-2" />
+            </div>
+          )}
           <div
             className="pointer-events-none absolute top-2 left-3 z-10 flex flex-wrap items-baseline gap-x-3 text-xs"
             aria-hidden

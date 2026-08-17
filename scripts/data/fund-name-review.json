@@ -1,0 +1,54 @@
+{
+  "reviewedAt": "2026-08-17",
+  "note": "The durable audit trail for lib/market/fund-name.ts's name-pattern classifier - see lib/market/fund-name-review.ts for how curate-bot-watchlist.ts uses this. Every entry here is a human decision about one symbol the classifier flagged, keyed by symbol. A flagged symbol with no entry here halts the curation script rather than being silently included or excluded - see curate-bot-watchlist.ts's own NEEDS REVIEW handling. Add an entry (decision + a short rationale) for any new symbol the script reports under NEEDS REVIEW, then re-run it.",
+  "entries": [
+    {
+      "symbol": "ARM",
+      "flagReason": "Depositary Shares wording",
+      "decision": "kept",
+      "rationale": "Arm Holdings plc - a real Nasdaq-100 semiconductor IP company, listed on Nasdaq via American Depositary Shares (the standard mechanism for a foreign-domiciled company), not a fund product."
+    },
+    {
+      "symbol": "PDD",
+      "flagReason": "Depositary Shares wording",
+      "decision": "kept",
+      "rationale": "PDD Holdings Inc. (Pinduoduo/Temu's parent) - a real Nasdaq-100 e-commerce company, listed via ADS for the same reason as ARM, not a fund."
+    },
+    {
+      "symbol": "IVZ",
+      "flagReason": "fund-issuer name prefix",
+      "decision": "kept",
+      "rationale": "Invesco Ltd itself - a real S&P 500 asset-management company. It issues funds/ETFs; it is not one of its own funds. The issuer-prefix pattern exists to catch products those firms issue, and correctly also catches the firm's own ticker as a name-collision - a known, expected case, not a surprise."
+    },
+    {
+      "symbol": "NTRS",
+      "flagReason": "Trust wording",
+      "decision": "kept",
+      "rationale": "Northern Trust Corporation - a real S&P 500 bank/asset-custody company. 'Trust' is part of its legal name (a real trust bank), not a fund/trust-vehicle wrapper."
+    },
+    {
+      "symbol": "CPT",
+      "flagReason": "Trust wording",
+      "decision": "kept",
+      "rationale": "Camden Property Trust - a real S&P 500 REIT. REITs are legally organized as trusts by statute; this is an operating real-estate company, not a pooled investment vehicle."
+    },
+    {
+      "symbol": "ESS",
+      "flagReason": "Trust wording",
+      "decision": "kept",
+      "rationale": "Essex Property Trust - a real S&P 500 REIT, same reasoning as CPT."
+    },
+    {
+      "symbol": "FRT",
+      "flagReason": "Trust wording",
+      "decision": "kept",
+      "rationale": "Federal Realty Investment Trust - a real S&P 500 REIT, same reasoning as CPT."
+    },
+    {
+      "symbol": "DLR",
+      "flagReason": "Trust wording",
+      "decision": "kept",
+      "rationale": "Digital Realty Trust - a real S&P 500 REIT, same reasoning as CPT."
+    }
+  ]
+}

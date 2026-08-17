@@ -11,7 +11,11 @@ import { StockQuoteCard } from "@/components/StockQuoteCard";
 import { getOrCreateAccount } from "@/lib/db/accounts";
 import { getAssetBySymbol } from "@/lib/db/assets";
 import { getLastLimitOrderWorkerRun } from "@/lib/db/limit-order-worker";
-import { getFilledOrdersForSymbol, getPendingOrdersForAccount } from "@/lib/db/orders";
+import {
+  getFilledOrdersForSymbol,
+  getOrdersForSymbol,
+  getPendingOrdersForAccount,
+} from "@/lib/db/orders";
 import { getPosition } from "@/lib/db/portfolio";
 import { isSymbolWatched } from "@/lib/db/watchlist";
 import type { BarTimeframe } from "@/lib/market/alpaca";
@@ -61,6 +65,7 @@ export default async function StockPage({ params }: StockPageProps) {
     watched,
     initialBars,
     fills,
+    symbolOrders,
     pendingOrders,
     lastWorkerRun,
   ] = await Promise.all([
@@ -70,6 +75,7 @@ export default async function StockPage({ params }: StockPageProps) {
     isSymbolWatched(account.id, symbol),
     fetchBars(symbol, DEFAULT_TIMEFRAME, RANGE_LOOKBACK_MS[DEFAULT_RANGE]),
     getFilledOrdersForSymbol(account.id, symbol),
+    getOrdersForSymbol(account.id, symbol),
     getPendingOrdersForAccount(account.id, symbol),
     getLastLimitOrderWorkerRun(),
   ]);
@@ -176,7 +182,7 @@ export default async function StockPage({ params }: StockPageProps) {
               />
             </div>
           }
-          orders={<StockOrderHistory fills={[...fills].reverse()} />}
+          orders={<StockOrderHistory orders={symbolOrders} />}
         />
       </div>
     </main>

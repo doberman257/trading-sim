@@ -3,6 +3,7 @@ import { toCents } from "../trading/money";
 import {
   currentBarStart,
   fetchBars,
+  fetchDailyBarsForSymbols,
   fetchQuote,
   fetchQuotes,
   NoTwoSidedQuoteError,
@@ -359,5 +360,84 @@ describe("fetchBars", () => {
     // The forming (later-fetched) version, not the completed/stale one -
     // close 104, not 101.
     expect(sharedBar?.closeCents).toBe(toCents("104.00"));
+  });
+});
+
+describe("fetchDailyBarsForSymbols", () => {
+  it("fetches every requested symbol in a single request when comfortably under Alpaca's per-request bars limit", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        bars: {
+          AAPL: [{ t: "2026-08-05T00:00:00Z", o: 100, h: 101, l: 99, c: 100.5, v: 1000 }],
+          TSLA: [{ t: "2026-08-05T00:00:00Z", o: 200, h: 201, l: 199, c: 200.5, v: 500 }],
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchDailyBarsForSymbols(["AAPL", "TSLA"], 30);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(result.get("AAPL")?.[0]?.closeCents).toBe(toCents("100.50"));
+    expect(result.get("TSLA")?.[0]?.closeCents).toBe(toCents("200.50"));
+  });
+
+  // The real bug this guards against, confirmed empirically against the
+  // real API before fixing: Alpaca's multi-symbol bars `limit` caps the
+  // TOTAL bars across every symbol in one request at 10,000, with no error
+  // when exceeded - it just silently returns only the first symbols and
+  // drops the rest. At the bot's real selection lookback (100 days) that
+  // cap is only ~150 symbols' worth; the expanded ~517-symbol watchlist
+  // hit this directly, silently losing data for 367 symbols with a 200 OK
+  // and no error anywhere. A large symbol count at a long-enough lookback
+  // must split into multiple requests, not hope one request is enough.
+  it("splits into multiple requests and merges the results when the symbol count would exceed Alpaca's per-request bars limit", async () => {
+    // lookbackDays=100 -> max 100 symbols per chunk (10000 / 100) - 250
+    // symbols needs exactly 3 chunks (100 + 100 + 50).
+    const symbols = Array.from({ length: 250 }, (_, i) => `SYM${i}`);
+    const fetchSpy = vi.fn(async (url: string) => {
+      const requestedSymbols = new URL(url).searchParams.get("symbols")!.split(",");
+      const bars: Record<string, unknown[]> = {};
+      for (const symbol of requestedSymbols) {
+        bars[symbol] = [{ t: "2026-08-05T00:00:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 100 }];
+      }
+      return jsonResponse({ bars });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetchDailyBarsForSymbols(symbols, 100);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const chunkSizes = fetchSpy.mock.calls
+      .map(([url]) => new URL(url as string).searchParams.get("symbols")!.split(",").length)
+      .toSorted((a, b) => b - a);
+    expect(chunkSizes).toEqual([100, 100, 50]);
+    // Every symbol resolved, not just the first chunk's worth.
+    expect(result.size).toBe(250);
+    expect(result.get("SYM0")).toBeDefined();
+    expect(result.get("SYM249")).toBeDefined();
+  });
+
+  it("keeps the other chunks' data when one chunk's request fails", async () => {
+    const symbols = Array.from({ length: 150 }, (_, i) => `SYM${i}`);
+    const fetchSpy = vi.fn(async (url: string) => {
+      const requestedSymbols = new URL(url).searchParams.get("symbols")!.split(",");
+      if (requestedSymbols.includes("SYM0")) {
+        return jsonResponse({}, false, 500);
+      }
+      const bars: Record<string, unknown[]> = {};
+      for (const symbol of requestedSymbols) {
+        bars[symbol] = [{ t: "2026-08-05T00:00:00Z", o: 10, h: 11, l: 9, c: 10.5, v: 100 }];
+      }
+      return jsonResponse({ bars });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // lookbackDays=100 -> 100 symbols per chunk, so this is 2 chunks: the
+    // first (containing SYM0) fails, the second must still come back.
+    const result = await fetchDailyBarsForSymbols(symbols, 100);
+
+    expect(result.has("SYM0")).toBe(false);
+    expect(result.has("SYM149")).toBe(true);
   });
 });

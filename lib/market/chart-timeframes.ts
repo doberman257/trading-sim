@@ -26,9 +26,11 @@ export const TIMEFRAME_ORDER: readonly BarTimeframe[] = ["15Min", "1Hour", "1Day
 //   3M:        1Hour, 1Day, 1Week
 //   1Y:               1Day, 1Week
 //
-// A sparse combination (e.g. 1Week bars over a 1W range, ~1 bar) is left
-// allowed - too few bars is a visibly honest "not much to show," never
-// wrong the way too many bars is (a screen you can't read at all).
+// A combination that's merely sparse but still shows real structure (e.g.
+// 1Day bars over a 1W range, ~7 bars) is left allowed - too few bars is a
+// visibly honest "not much to show," never wrong the way too many bars is
+// (a screen you can't read at all). A combination with essentially nothing
+// to show (e.g. 1Week bars over a 1W range, ~1 bar) is still excluded below.
 const ALLOWED_TIMEFRAMES_BY_RANGE: Record<ChartRange, readonly BarTimeframe[]> = {
   "1W": ["15Min", "1Hour", "1Day"],
   "1M": ["15Min", "1Hour", "1Day", "1Week"],
@@ -42,6 +44,27 @@ export function allowedTimeframesForRange(range: ChartRange): readonly BarTimefr
 
 export function isValidTimeframeForRange(range: ChartRange, timeframe: BarTimeframe): boolean {
   return ALLOWED_TIMEFRAMES_BY_RANGE[range].includes(timeframe);
+}
+
+// Why a disabled timeframe is disabled, for messaging. Every range's allowed
+// set is a contiguous slice of TIMEFRAME_ORDER (finer-to-coarser), so an
+// invalid timeframe is either finer than everything allowed (too many bars
+// to render meaningfully) or coarser than everything allowed (too few bars
+// to show anything useful) - never both, and never neither.
+export function timeframeIncompatibilityReason(
+  range: ChartRange,
+  timeframe: BarTimeframe,
+): "too-many-bars" | "too-few-bars" | null {
+  if (isValidTimeframeForRange(range, timeframe)) {
+    return null;
+  }
+
+  const timeframeIndex = TIMEFRAME_ORDER.indexOf(timeframe);
+  const finestAllowedIndex = Math.min(
+    ...allowedTimeframesForRange(range).map((tf) => TIMEFRAME_ORDER.indexOf(tf)),
+  );
+
+  return timeframeIndex < finestAllowedIndex ? "too-many-bars" : "too-few-bars";
 }
 
 // When switching to a range that makes the currently-selected timeframe

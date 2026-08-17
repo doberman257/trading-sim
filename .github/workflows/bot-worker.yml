@@ -1,0 +1,48 @@
+name: Bot worker
+
+# Calls the deployed app's bot-run worker route - the actual work (claiming
+# selecting runs, entering a candidate, monitoring holding runs for a
+# stop-loss/day-expiry/rule-exit) all lives behind that one HTTP endpoint
+# (app/api/worker/bot-runs/route.ts), not in this workflow. Mirrors
+# limit-order-worker.yml's exact shape (bearer secret, WORKER_URL, the
+# route's own VERCEL_ENV production guard) with one deliberate difference:
+# workflow_dispatch only, no `schedule:` trigger. A worker that can place
+# real (paper) trades unattended shouldn't run on autopilot before a real
+# live-market entry/exit cycle has been manually verified - see STATE.md.
+# Wiring up a schedule here is a separate, later decision, not an oversight.
+#
+# Uses the SAME repo secret as the limit-order worker, not a second one -
+# app/api/worker/bot-runs/route.ts calls the exact same
+# isAuthorizedWorkerRequest (lib/auth/worker-secret.ts), which checks
+# process.env.LIMIT_ORDER_WORKER_SECRET specifically. There is no separate
+# BOT_WORKER_SECRET anywhere in the app; inventing one here would just
+# reference a value the route never checks.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  invoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the worker route
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          LIMIT_ORDER_WORKER_SECRET: ${{ secrets.LIMIT_ORDER_WORKER_SECRET }}
+        run: |
+          if [ -z "$WORKER_URL" ] || [ -z "$LIMIT_ORDER_WORKER_SECRET" ]; then
+            echo "Missing the WORKER_URL or LIMIT_ORDER_WORKER_SECRET repository secret - see README.md's Setup section." >&2
+            exit 1
+          fi
+
+          status=$(curl -s -o /tmp/response.json -w "%{http_code}" -X POST \
+            "$WORKER_URL/api/worker/bot-runs" \
+            -H "Authorization: Bearer $LIMIT_ORDER_WORKER_SECRET")
+
+          echo "HTTP status: $status"
+          cat /tmp/response.json
+          echo
+
+          if [ "$status" -ge 400 ]; then
+            echo "Worker call failed." >&2
+            exit 1
+          fi

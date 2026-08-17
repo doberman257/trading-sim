@@ -433,6 +433,41 @@ export async function getFilledOrdersForSymbol(
   });
 }
 
+export type SymbolOrder = {
+  id: string;
+  side: Side;
+  quantity: number;
+  status: OrderStatus;
+  filledPriceCents: bigint | null;
+  createdAt: Date;
+};
+
+// Every order for one symbol, regardless of status, newest first - the
+// stock detail page's Orders tab. Deliberately separate from
+// getFilledOrdersForSymbol above rather than a filter over it: that
+// function's own fills also feed the chart's trade markers, which must stay
+// filled-only, so widening it in place would have leaked pending/cancelled/
+// rejected orders onto the chart too. Ordered by createdAt, not filledAt
+// (which is null for anything but a fill) - matching RecentOrdersPanel's own
+// Time-column convention for the same reason.
+export async function getOrdersForSymbol(
+  accountId: string,
+  symbol: string,
+): Promise<SymbolOrder[]> {
+  return db
+    .select({
+      id: orders.id,
+      side: orders.side,
+      quantity: orders.quantity,
+      status: orders.status,
+      filledPriceCents: orders.filledPriceCents,
+      createdAt: orders.createdAt,
+    })
+    .from(orders)
+    .where(and(eq(orders.accountId, accountId), eq(orders.symbol, symbol)))
+    .orderBy(desc(orders.createdAt));
+}
+
 export type PendingOrderForDisplay = {
   id: string;
   symbol: string;
