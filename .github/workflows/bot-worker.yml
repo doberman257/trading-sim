@@ -5,11 +5,8 @@ name: Bot worker
 # stop-loss/day-expiry/rule-exit) all lives behind that one HTTP endpoint
 # (app/api/worker/bot-runs/route.ts), not in this workflow. Mirrors
 # limit-order-worker.yml's exact shape (bearer secret, WORKER_URL, the
-# route's own VERCEL_ENV production guard) with one deliberate difference:
-# workflow_dispatch only, no `schedule:` trigger. A worker that can place
-# real (paper) trades unattended shouldn't run on autopilot before a real
-# live-market entry/exit cycle has been manually verified - see STATE.md.
-# Wiring up a schedule here is a separate, later decision, not an oversight.
+# route's own VERCEL_ENV production guard, and the schedule itself - see
+# below).
 #
 # Uses the SAME repo secret as the limit-order worker, not a second one -
 # app/api/worker/bot-runs/route.ts calls the exact same
@@ -17,7 +14,32 @@ name: Bot worker
 # process.env.LIMIT_ORDER_WORKER_SECRET specifically. There is no separate
 # BOT_WORKER_SECRET anywhere in the app; inventing one here would just
 # reference a value the route never checks.
+#
+# A real manual workflow_dispatch run was verified first (200, 3 runs
+# correctly evaluated across the full 517-symbol watchlist, zero false
+# entries, consistent zero counts across every dependent field) before this
+# schedule was added - see STATE.md.
 on:
+  schedule:
+    # Every 5 minutes, unconditionally - deliberately NOT restricted to
+    # market hours, matching limit-order-worker.yml's own schedule exactly
+    # rather than inventing a new pattern. This is a real choice, not an
+    # oversight: a hardcoded UTC market-hours window would need manual
+    # adjustment across the EST/EDT boundary twice a year - exactly the
+    # class of bug lib/trading/market-hours.ts's own real IANA-timezone
+    # handling was built to avoid, so hand-rolling a second, cruder version
+    # of the same problem here would be a step backward, not forward.
+    # Market-hours awareness lives in the route itself, not the schedule:
+    # runSelectionCycle/runMonitoringCycle (lib/db/bot-runs.ts) each start
+    # with a cheap DB SELECT and return immediately - no Alpaca call at all
+    # - whenever there are no selecting/holding runs, so a tick outside
+    # market hours (or with nothing active) costs almost nothing, the same
+    # tolerance-for-irregular-invocation the limit-order worker's own
+    # schedule already relies on.
+    - cron: "*/5 * * * *"
+  # Lets this be triggered by hand from the Actions tab too - useful for a
+  # spot-check without waiting for the next tick, not just for testing
+  # before the schedule existed.
   workflow_dispatch: {}
 
 jobs:

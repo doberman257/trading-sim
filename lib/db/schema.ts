@@ -37,6 +37,13 @@ export const limitOrderWorkerRunStatusEnum = pgEnum("limit_order_worker_run_stat
   "succeeded",
   "failed",
 ]);
+// Same three-state shape again, its own named type for the same reason -
+// see botWorkerRuns below.
+export const botWorkerRunStatusEnum = pgEnum("bot_worker_run_status", [
+  "running",
+  "succeeded",
+  "failed",
+]);
 // The bot run lifecycle - see lib/db/bot-runs.ts for the state machine this
 // enum drives. "selecting" and "holding" are the two in-flight states (no
 // candidate found yet vs. a position is open); every "closed_*" value names
@@ -250,6 +257,34 @@ export const limitOrderWorkerRuns = pgTable("limit_order_worker_runs", {
   ordersEvaluated: integer("orders_evaluated"),
   ordersFilled: integer("orders_filled"),
   ordersExpired: integer("orders_expired"),
+  errorMessage: text("error_message"),
+});
+
+// Same append-only run-log shape as limitOrderWorkerRuns, for the same
+// reason: without this, a bot_worker_runs-shaped fact simply doesn't exist
+// anywhere - runSelectionCycle/runMonitoringCycle (lib/db/bot-runs.ts) write
+// nothing to the database at all when there's no selecting/holding bot_runs
+// row to act on, which is the common case. That means "the scheduled
+// worker is silently no longer firing" and "the worker is firing and
+// correctly finding nothing to do" were, before this table existed,
+// indistinguishable from inside this app - both looked like silence. Every
+// invocation writes a row here regardless of whether it found any bot_runs
+// to act on, specifically so that distinction becomes answerable (see
+// app/api/worker/bot-status/route.ts). The five *count columns mirror
+// BotWorkerCounts (lib/db/bot-runs.ts) exactly, not a subset - a run log
+// that couldn't show the full shape the route itself already returns would
+// be a strictly worse observability tool than just reading the workflow's
+// own logged response.
+export const botWorkerRuns = pgTable("bot_worker_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  status: botWorkerRunStatusEnum("status").notNull().default("running"),
+  runsConsideredForSelection: integer("runs_considered_for_selection"),
+  runsEntered: integer("runs_entered"),
+  runsFailedNoAffordableCandidate: integer("runs_failed_no_affordable_candidate"),
+  runsMonitored: integer("runs_monitored"),
+  runsClosed: integer("runs_closed"),
   errorMessage: text("error_message"),
 });
 
