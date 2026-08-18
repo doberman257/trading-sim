@@ -35,8 +35,9 @@ export default function PositionRowPreviewPage() {
     <main className="bg-base min-h-screen p-6">
       <p className="text-subtle mb-4 text-xs">
         Design preview only — not part of the dashboard. Demonstrates{" "}
-        <code className="text-muted">PositionRow</code> in four states: profit, loss, stale (market
-        closed), and price unavailable.
+        <code className="text-muted">PositionRow</code> in five states: profit, loss, stale (market
+        closed, priced), missing quote while the market is open, and missing quote while the market
+        is closed.
       </p>
 
       <div className="mx-auto max-w-3xl">
@@ -83,7 +84,10 @@ export default function PositionRowPreviewPage() {
                 <PositionRow symbol="TSLA" {...loss} sparklineCloses={downSparkline} />
                 {/* Stale - market closed, last-close price dimmed */}
                 <PositionRow symbol="MSFT" {...stale} isStale sparklineCloses={flatSparkline} />
-                {/* Price unavailable - distinct from stale: no number at all, not even a dimmed one */}
+                {/* Missing quote, market open - distinct from stale: no number
+                    at all, not even a dimmed one. The rarer, more
+                    noteworthy case, so it keeps the subtle/muted "?"
+                    treatment rather than the calmer closed-market one below. */}
                 <PositionRow
                   symbol="GOOG"
                   quantity={8}
@@ -92,6 +96,21 @@ export default function PositionRowPreviewPage() {
                   marketValueCents={null}
                   unrealizedPnlCents={null}
                   unrealizedPnlPercent={null}
+                  sparklineCloses={[]}
+                />
+                {/* Missing quote, market closed - the common, expected case
+                    (no quote cache - see CLAUDE.md), so it reuses the same
+                    calm warn/◷ treatment as the "stale" row above instead
+                    of reading like an error. */}
+                <PositionRow
+                  symbol="INTC"
+                  quantity={30}
+                  avgCostCents={toCents("22.00")}
+                  currentPriceCents={null}
+                  marketValueCents={null}
+                  unrealizedPnlCents={null}
+                  unrealizedPnlPercent={null}
+                  isStale
                   sparklineCloses={[]}
                 />
               </tbody>

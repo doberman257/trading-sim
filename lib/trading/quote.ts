@@ -84,3 +84,26 @@ export function isSpreadImplausiblyWide(bidCents: Cents, askCents: Cents): boole
 export function describeWideSpreadWarning(symbol: string): string {
   return `${symbol}'s bid-ask spread looks unusually wide right now. This can mean the stock itself has thin or volatile liquidity, or that this app's free single-exchange (IEX) data feed isn't seeing the full market's best price - most noticeable right around the close. Either way, treat this price with extra caution.`;
 }
+
+// Shared wording for a held position (or several) whose live quote is
+// currently unavailable (calculatePortfolio's missingQuoteSymbols,
+// lib/trading/portfolio.ts) - same reasoning as describeWideSpreadWarning
+// above: one function so SummaryPanel, PositionRow, and PositionCard all
+// read identically instead of drifting into near-duplicate copies.
+//
+// Deliberately distinguishes "the market is closed" from "the market is
+// open and a quote is still missing", rather than using one generic
+// message for both. This app keeps no quote cache (every fetch is live -
+// see the caching rules in CLAUDE.md), so a missing quote while the market
+// is closed is the expected, overwhelmingly common case, not a problem -
+// wording it as an error ("price unavailable") reads as broken when it
+// isn't. A missing quote while the market is genuinely open is a real,
+// separate, and rarer condition (the kind investigated in STATE.md's
+// closing-bell/IEX findings extending into intraday hours) - it must never
+// be worded as "market closed" when the market is not, in fact, closed.
+export function describeMissingQuote(symbols: readonly string[], marketOpen: boolean): string {
+  const list = symbols.join(", ");
+  return marketOpen
+    ? `The live price of ${list} isn't available right now.`
+    : `Market closed - the value of ${list} isn't shown until trading resumes.`;
+}

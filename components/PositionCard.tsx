@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Delta } from "./Delta";
 import { Sparkline } from "./Sparkline";
 import { formatCents } from "@/lib/trading/money";
+import { describeMissingQuote } from "@/lib/trading/quote";
 import type { PositionRowProps } from "./PositionRow";
 
 // The mobile counterpart of PositionRow (a <tr>) - see the trading-ui-design
@@ -37,7 +38,17 @@ export function PositionCard({
       <div className="mb-2 flex items-center justify-between">
         <span className="text-fg font-medium">{symbol}</span>
         {priceUnavailable ? (
-          <span className="text-subtle text-xs">price unavailable</span>
+          // Same reasoning as PositionRow's own missing-quote badge: a
+          // closed market reuses the calm warn/stale treatment instead of
+          // a separate, more alarming "?" glyph, since that's the expected,
+          // common case (no quote cache - see CLAUDE.md), not something
+          // broken.
+          <span
+            className={`text-xs ${isStale ? "text-warn" : "text-subtle"}`}
+            title={describeMissingQuote([symbol], !isStale)}
+          >
+            {isStale ? "market closed" : "price unavailable"}
+          </span>
         ) : (
           isStale && <span className="text-warn text-xs">stale</span>
         )}

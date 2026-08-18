@@ -43,3 +43,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# scratch diagnostic-script output (e.g. scripts/poll-popular-quotes.ts) -
+# real captured data, but investigation output, not app code
+/logs

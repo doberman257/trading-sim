@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { calculateSpreadCents, isSpreadImplausiblyWide, isValidTwoSidedQuote } from "./quote";
+import {
+  calculateSpreadCents,
+  describeMissingQuote,
+  isSpreadImplausiblyWide,
+  isValidTwoSidedQuote,
+} from "./quote";
 import { toCents } from "./money";
 
 // Six real quotes pulled directly from Alpaca's own latest-quote endpoint
@@ -117,5 +122,28 @@ describe("isSpreadImplausiblyWide", () => {
     expect(
       isSpreadImplausiblyWide(REAL_CLOSING_QUOTES.AAPL.bidCents, REAL_CLOSING_QUOTES.AAPL.askCents),
     ).toBe(false);
+  });
+});
+
+describe("describeMissingQuote", () => {
+  it("says the market is closed, not that the price is 'unavailable', when the market is closed", () => {
+    expect(describeMissingQuote(["INTC"], false)).toBe(
+      "Market closed - the value of INTC isn't shown until trading resumes.",
+    );
+  });
+
+  // The rarer, more concerning case (see the closing-bell investigation
+  // this session extended into intraday hours) - must never claim the
+  // market is closed when it isn't.
+  it("does not claim the market is closed when it's actually open", () => {
+    const message = describeMissingQuote(["INTC"], true);
+    expect(message).toBe("The live price of INTC isn't available right now.");
+    expect(message).not.toMatch(/market closed/i);
+  });
+
+  it("lists every symbol, not just the first, for more than one missing quote", () => {
+    expect(describeMissingQuote(["INTC", "AAPL"], false)).toBe(
+      "Market closed - the value of INTC, AAPL isn't shown until trading resumes.",
+    );
   });
 });
