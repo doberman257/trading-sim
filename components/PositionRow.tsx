@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Delta } from "./Delta";
 import { Sparkline } from "./Sparkline";
 import { formatCents } from "@/lib/trading/money";
+import { describeMissingQuote } from "@/lib/trading/quote";
 
 export type PositionRowProps = {
   symbol: string;
@@ -38,6 +39,14 @@ export function PositionRow({
     unrealizedPnlCents === null ||
     percent === null
   ) {
+    // Not worded/colored as an error when the market is closed - a missing
+    // quote then is this app's expected, common case (no quote cache, see
+    // CLAUDE.md), not something broken. Reuses the same warn/◷ treatment
+    // the "stale" badge below already uses for the exact same closed-market
+    // fact, rather than a separate "?" glyph that would read as a distinct,
+    // more alarming state. The rarer case - market genuinely open, quote
+    // still missing - keeps the original subtle/muted "?" treatment, since
+    // that IS a real, more noteworthy condition worth visually separating.
     return (
       <tr className="border-default/50 hover:bg-elevated border-b transition-colors">
         <td className="text-fg px-3 py-2.5 font-medium">
@@ -45,11 +54,13 @@ export function PositionRow({
             {symbol}
           </Link>
           <span
-            className="text-subtle ml-2 inline-flex items-center gap-1 text-xs font-normal"
-            title="No quote is currently available for this symbol"
+            className={`ml-2 inline-flex items-center gap-1 text-xs font-normal ${
+              isStale ? "text-warn" : "text-subtle"
+            }`}
+            title={describeMissingQuote([symbol], !isStale)}
           >
-            <span aria-hidden>?</span>
-            price unavailable
+            <span aria-hidden>{isStale ? "◷" : "?"}</span>
+            {isStale ? "market closed" : "price unavailable"}
           </span>
         </td>
         <td className="text-fg px-3 py-2.5 text-right font-mono text-sm tabular-nums">

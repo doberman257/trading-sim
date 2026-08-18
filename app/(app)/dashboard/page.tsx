@@ -103,6 +103,7 @@ export default async function DashboardPage() {
           totalEquityCents={valuation.totalEquityCents}
           totalUnrealizedPnlCents={valuation.totalUnrealizedPnlCents}
           missingQuoteSymbols={valuation.missingQuoteSymbols}
+          isStale={isStale}
         />
         <PortfolioAllocation slices={allocation} />
         {/* 320px fixed for the order ticket (a form, not content that grows);
