@@ -29,6 +29,12 @@ export type OrderTicketProps = {
   // Left unset on the dashboard, where the ticket is the one place a symbol
   // gets typed in the first place.
   fixedSymbol?: string;
+  // The page's own already-fetched quote for fixedSymbol - the exact same
+  // one its StockQuoteCard header shows. Only meaningful alongside
+  // fixedSymbol; ignored otherwise. Crosses the Server -> Client boundary
+  // as strings, same reasoning as cashCentsString above. Null means the
+  // page's own fetch found no live quote for this symbol.
+  initialQuote?: { bidCents: string; askCents: string } | null;
 };
 
 type SubmitOutcome =
@@ -47,6 +53,7 @@ export function OrderTicket({
   heldPositions,
   marketStatus,
   fixedSymbol,
+  initialQuote,
 }: OrderTicketProps) {
   const cashCents = BigInt(cashCentsString);
   const router = useRouter();
@@ -56,8 +63,19 @@ export function OrderTicket({
   const [symbolInput, setSymbolInput] = useState(fixedSymbol ?? "");
   const [quantityInput, setQuantityInput] = useState("");
   const [limitPriceInput, setLimitPriceInput] = useState("");
-  const [quote, setQuote] = useState<{ bidCents: Cents; askCents: Cents } | null>(null);
-  const [quoteStatus, setQuoteStatus] = useState<"idle" | "loading" | "unavailable">("idle");
+  // Seeded synchronously from initialQuote when fixedSymbol is set - the
+  // page's own already-fetched quote, not a placeholder waiting on a fetch.
+  // See the useEffect below for why a fixedSymbol ticket never fetches its
+  // own quote at all.
+  const [quote, setQuote] = useState<{ bidCents: Cents; askCents: Cents } | null>(() =>
+    fixedSymbol && initialQuote
+      ? { bidCents: BigInt(initialQuote.bidCents), askCents: BigInt(initialQuote.askCents) }
+      : null,
+  );
+  const [quoteStatus, setQuoteStatus] = useState<"idle" | "loading" | "unavailable">(() => {
+    if (!fixedSymbol) return "idle";
+    return initialQuote ? "idle" : "unavailable";
+  });
   const [outcome, setOutcome] = useState<SubmitOutcome | null>(null);
   const [isSubmitting, startSubmit] = useTransition();
   const requestIdRef = useRef(0);
@@ -86,7 +104,19 @@ export function OrderTicket({
   // response for a symbol the user already changed away from can never
   // overwrite a newer one - without this, typing quickly could leave the
   // estimate showing a stale symbol's price.
+  //
+  // A fixedSymbol ticket never reaches any of this - it already has a live
+  // quote (initialQuote, seeded above) fetched once by the page itself, the
+  // exact same one its own StockQuoteCard header shows. Fetching
+  // independently here too was the actual bug: two separate live fetches
+  // of the same symbol at two different moments, each individually correct
+  // but disagreeing with each other on screen (see STATE.md). Only the
+  // dashboard's free-text ticket - which has no page-level quote to share,
+  // since the symbol isn't known until the user picks one - still needs
+  // its own live fetch.
   useEffect(() => {
+    if (fixedSymbol) return;
+
     if (!isValidSymbol) {
       setQuote(null);
       setQuoteStatus("idle");
@@ -116,7 +146,7 @@ export function OrderTicket({
     }, QUOTE_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [isValidSymbol, symbol]);
+  }, [isValidSymbol, symbol, fixedSymbol]);
 
   const estimatedAmountCents =
     quote && isValidQuantity
@@ -340,7 +370,15 @@ export function OrderTicket({
             just be the same numbers twice on screen at once - the ticket's
             own copy earns its place only where it's the sole source of
             price info, which today means the dashboard's free-search
-            context specifically. */}
+            context specifically.
+
+            This is about the VISUAL duplicate only - the quote data itself
+            is never fetched twice either way. When fixedSymbol is set, the
+            estimate below is computed from initialQuote (the same fetch
+            the header above already used), not a second independent one -
+            see the useEffect above for why: two live fetches of the same
+            symbol at two different moments once put a different, both-
+            individually-correct price in each place at once. */}
         {!fixedSymbol &&
           isValidSymbol &&
           (quoteStatus === "loading" ? (
@@ -401,8 +439,8 @@ export function OrderTicket({
         </div>
         {orderType === "market" ? (
           <p className="text-subtle text-xs leading-snug">
-            Estimate only - the actual fill price is determined when the order executes and can
-            differ.
+            Estimate only, based on this page's quote - the actual fill price is set at execution
+            and can differ, more so the longer this page has been open.
           </p>
         ) : (
           <p className="text-subtle text-xs leading-snug">

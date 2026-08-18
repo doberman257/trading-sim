@@ -95,6 +95,12 @@ export default async function StockPage({ params }: StockPageProps) {
       heldPositions={position ? [{ symbol, quantity: position.quantity }] : []}
       marketStatus={marketStatus}
       fixedSymbol={symbol}
+      // The exact same quote StockQuoteCard below renders - see
+      // OrderTicket's own note on why this must be shared, not
+      // independently re-fetched.
+      initialQuote={
+        quote ? { bidCents: quote.bidCents.toString(), askCents: quote.askCents.toString() } : null
+      }
     />
   );
 
