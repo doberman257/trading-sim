@@ -24,6 +24,11 @@ const TargetConfigSchema = z.union([
 ]);
 
 const CreateBotRunBodySchema = z.object({
+  // Membership in AVAILABLE_STRATEGIES is createBotRun's own job (the one
+  // place that already needs to know the full set) - this schema only
+  // confirms the shape of what the client sent, not whether it's a real
+  // strategy.
+  ruleId: z.string().min(1),
   capitalCents: CentsStringSchema,
   profitTarget: TargetConfigSchema,
   stopLoss: TargetConfigSchema,
@@ -51,10 +56,11 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: z.treeifyError(parsed.error) }, { status: 400 });
   }
 
-  const { capitalCents, profitTarget, stopLoss, timeHorizonDeadlineAt } = parsed.data;
+  const { ruleId, capitalCents, profitTarget, stopLoss, timeHorizonDeadlineAt } = parsed.data;
 
   const result = await createBotRun({
     userId: auth.userId,
+    ruleId,
     capitalCents,
     profitTarget: profitTarget as TargetConfig,
     stopLoss: stopLoss as TargetConfig,

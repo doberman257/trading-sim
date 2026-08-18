@@ -2,11 +2,13 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition, type FormEvent } from "react";
+import { AVAILABLE_STRATEGIES } from "@/lib/trading/bot-rule";
 import { toCents } from "@/lib/trading/money";
 
 type TargetType = "dollar" | "percent";
 
-type CreateBotRunErrorReason = "invalid_capital" | "invalid_profit_target" | "invalid_stop_loss";
+type CreateBotRunErrorReason =
+  "invalid_capital" | "invalid_profit_target" | "invalid_stop_loss" | "invalid_rule_id";
 
 function reasonMessage(reason: CreateBotRunErrorReason): string {
   switch (reason) {
@@ -16,12 +18,26 @@ function reasonMessage(reason: CreateBotRunErrorReason): string {
       return "Profit target must be valid (a dollar amount up to the capital committed, or a percent between 0 and 100).";
     case "invalid_stop_loss":
       return "Stop-loss must be valid (a dollar amount up to the capital committed, or a percent between 0 and 100).";
+    case "invalid_rule_id":
+      return "Choose a strategy for this run.";
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;
     }
   }
 }
+
+// AVAILABLE_STRATEGIES is plain data (see bot-rule.ts's own comment on the
+// registry) - safe to import directly into this Client Component rather
+// than threading it down as a prop, the same as any other shared constant.
+const STRATEGY_IDS = Object.keys(AVAILABLE_STRATEGIES);
+const firstStrategyId = STRATEGY_IDS[0];
+if (!firstStrategyId) {
+  throw new Error(
+    "AVAILABLE_STRATEGIES is empty - BotRunForm needs at least one choosable strategy",
+  );
+}
+const DEFAULT_RULE_ID: string = firstStrategyId;
 
 const inputClassName =
   "border-default bg-elevated text-fg placeholder:text-subtle focus:border-strong focus:ring-accent w-full rounded-md border px-3 py-2 font-mono text-sm tabular-nums focus:ring-1 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50";
@@ -98,6 +114,7 @@ function TargetInput({
 export function BotRunForm() {
   const router = useRouter();
 
+  const [ruleId, setRuleId] = useState(DEFAULT_RULE_ID);
   const [capitalInput, setCapitalInput] = useState("");
   const [profitTargetType, setProfitTargetType] = useState<TargetType>("dollar");
   const [profitTargetInput, setProfitTargetInput] = useState("");
@@ -160,6 +177,7 @@ export function BotRunForm() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            ruleId,
             capitalCents: capitalCents.toString(),
             profitTarget,
             stopLoss,
@@ -195,9 +213,26 @@ export function BotRunForm() {
         <h2 className="text-fg text-sm font-medium">Start a bot run</h2>
       </header>
       <form onSubmit={handleSubmit} className="flex flex-col gap-3 p-4">
+        <label className="flex flex-col gap-1">
+          <span className="text-muted text-xs">Strategy</span>
+          <select
+            value={ruleId}
+            onChange={(event) => setRuleId(event.target.value)}
+            className={inputClassName}
+          >
+            {STRATEGY_IDS.map((id) => (
+              <option key={id} value={id}>
+                {AVAILABLE_STRATEGIES[id]!.label}
+              </option>
+            ))}
+          </select>
+          <span className="text-subtle text-xs leading-snug">
+            {AVAILABLE_STRATEGIES[ruleId]?.description}
+          </span>
+        </label>
         <p className="text-subtle text-xs leading-snug">
-          Rule: RSI(14) &lt; 30 with price above SMA(50) - one stated rule, applied to a curated
-          watchlist. Every trade is tagged and measured; see Bot runs and Bot rule stats below.
+          One stated rule per run, applied to a curated watchlist. Every trade is tagged and
+          measured; see Bot runs and Bot rule stats below.
         </p>
         <label className="flex flex-col gap-1">
           <span className="text-muted text-xs">Capital</span>
