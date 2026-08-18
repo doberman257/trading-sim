@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_RSI_PERIOD, ema, rsi, sma } from "./indicators";
+import { DEFAULT_RSI_PERIOD, ema, rollingHigh, rsi, sma } from "./indicators";
 import { toCents } from "./money";
 
 // Indicator outputs are in cents (fractional - see indicators.ts's own
@@ -154,5 +154,65 @@ describe("rsi", () => {
     // Day 15 matches the published 73.38 almost exactly, since by this
     // point the rounding discrepancy from day 14 has barely compounded.
     expect(result[15]).toBeCloseTo(73.38, 1);
+  });
+});
+
+describe("rollingHigh", () => {
+  it("returns null for every index when there are fewer bars than the period", () => {
+    expect(rollingHigh(cents([100, 101]), 5)).toEqual([null, null]);
+  });
+
+  it("returns null for exactly the first period-1 indices, explicitly, not 0", () => {
+    const result = rollingHigh(cents([100, 101, 102, 103, 104]), 3);
+    expect(result[0]).toBeNull();
+    expect(result[1]).toBeNull();
+    expect(result[0]).not.toBe(0);
+  });
+
+  it("is the constant value itself for a flat price series", () => {
+    const result = rollingHigh(cents([100, 100, 100, 100]), 3);
+    expect(result).toEqual([null, null, 10000, 10000]);
+  });
+
+  it("matches hand-computed values for a rising-then-falling series, including at the current index", () => {
+    // $100, $105, $110, $103, $98 (10000, 10500, 11000, 10300, 9800 cents); period 3.
+    // Window ending at 2 (indices 0-2): max(10000,10500,11000) = 11000 -
+    // the current index's own value can be the max, matching sma/ema's own
+    // "trailing window including index i" convention.
+    // Window ending at 3 (indices 1-3): max(10500,11000,10300) = 11000 -
+    // still the now-past peak at index 2, correctly carried forward.
+    // Window ending at 4 (indices 2-4): max(11000,10300,9800) = 11000 -
+    // the peak is still inside this window (index 2), one index before it
+    // would drop out.
+    const result = rollingHigh(cents([100, 105, 110, 103, 98]), 3);
+    expect(result).toEqual([null, null, 11000, 11000, 11000]);
+  });
+
+  it("drops the old high once it falls out of the trailing window", () => {
+    // $110, $100, $100, $100, $100 (11000, 10000, ...); period 3. The $110
+    // peak at index 0 is inside windows ending at 2 (indices 0-2), but
+    // gone from the window ending at 3 (indices 1-3) - the rolling high
+    // must fall back to $100 there, not keep reporting a high that's no
+    // longer within the trailing period.
+    const result = rollingHigh(cents([110, 100, 100, 100, 100]), 3);
+    expect(result).toEqual([null, null, 11000, 10000, 10000]);
+  });
+
+  it("a real breakout: today's close exceeds the prior window's rolling high, read one index back", () => {
+    // A flat run at $100, then a genuine breakout to $106 on the last day -
+    // the exact comparison a breakout rule makes: today's raw close vs.
+    // rollingHigh's value at the PRIOR index (the highest close before
+    // today), not the value at today's own index (which would trivially
+    // already include today's new high). Both indices compared here are
+    // real, non-null values (period 3 needs index >= 2), not the null
+    // lead-in already covered above.
+    const closes = cents([100, 100, 100, 100, 106]);
+    const result = rollingHigh(closes, 3);
+    const todayIndex = 4;
+    expect(Number(closes[todayIndex])).toBeGreaterThan(result[todayIndex - 1]!);
+    // And the day before, $100 was not a breakout above its own prior
+    // window's high ($100) - equal, not exceeding.
+    const previousIndex = 3;
+    expect(Number(closes[previousIndex])).not.toBeGreaterThan(result[previousIndex - 1]!);
   });
 });

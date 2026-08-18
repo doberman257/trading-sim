@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
+import postgres from "postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bar } from "../market/alpaca";
 import { fetchDailyBarsForSymbols, fetchQuotes } from "../market/alpaca";
 import { isApproachingMarketClose } from "../trading/bot-day-expiry";
-import { rsi, sma } from "../trading/indicators";
+import { rollingHigh, rsi, sma } from "../trading/indicators";
+import {
+  BREAKOUT_52WK_HIGH_V1_ID,
+  GOLDEN_CROSS_V1_ID,
+  RSI_PULLBACK_UPTREND_V2_ID,
+} from "../trading/bot-rule";
 import { isMarketOpen } from "../trading/market-hours";
 import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
@@ -19,7 +25,7 @@ import {
 import { db, poolMax } from "./client";
 import { runLimitOrderWorker } from "./limit-order-worker";
 import { cancelOrderByAccountId } from "./orders";
-import { accounts, botRuns, orders } from "./schema";
+import { accounts, botRuns, orders, positions } from "./schema";
 import { assertLedgerBalances } from "./test-helpers";
 
 // Same discipline as limit-order-worker.test.ts: everything else hits the
@@ -32,7 +38,12 @@ import { assertLedgerBalances } from "./test-helpers";
 vi.mock("../market/alpaca", () => ({ fetchQuotes: vi.fn(), fetchDailyBarsForSymbols: vi.fn() }));
 vi.mock("../trading/market-hours", () => ({ isMarketOpen: vi.fn() }));
 vi.mock("../trading/bot-day-expiry", () => ({ isApproachingMarketClose: vi.fn() }));
-vi.mock("../trading/indicators", () => ({ rsi: vi.fn(), sma: vi.fn(), DEFAULT_RSI_PERIOD: 14 }));
+vi.mock("../trading/indicators", () => ({
+  rsi: vi.fn(),
+  sma: vi.fn(),
+  rollingHigh: vi.fn(),
+  DEFAULT_RSI_PERIOD: 14,
+}));
 
 function bar(closeCents: bigint, volume: number): Bar {
   return {
@@ -72,6 +83,113 @@ function mockEligibleCandidate(quote: Partial<Quote> = {}): void {
   vi.mocked(sma).mockReturnValue([10000]);
 }
 
+// Same AAPL quote/bar setup as mockEligibleCandidate, but the sma() mock
+// distinguishes its calls by period (rsi_pullback's own SMA(50) check vs.
+// golden_cross's fast SMA(20)/slow SMA(50)) so AAPL genuinely qualifies
+// under BOTH rule families at once - needed to prove runSelectionCycle's
+// per-ruleId grouping actually computes two independent ranked lists,
+// rather than two runs happening to share one list under different labels.
+// A single vi.fn().mockReturnValue(...) can't do this: every call would
+// return the identical array regardless of period, which would make
+// golden_cross's smaFast > smaSlow comparison always false (fast and slow
+// would always read as equal).
+function mockEligibleForBothRuleFamilies(): void {
+  vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+    new Map([["AAPL", [bar(toCents("105.00"), 1_000_000)]]]),
+  );
+  vi.mocked(fetchQuotes).mockResolvedValue({
+    quotes: new Map([
+      [
+        "AAPL",
+        {
+          symbol: "AAPL",
+          bidCents: toCents("99.50"),
+          askCents: toCents("100.00"),
+          timestamp: new Date(),
+        },
+      ],
+    ]),
+    failedSymbols: [],
+  });
+  vi.mocked(rsi).mockReturnValue([25]); // oversold - satisfies rsi_pullback's own RSI<40 check
+  vi.mocked(sma).mockImplementation((_closes, period) => {
+    if (period === 20) return [9900, 10001]; // fast SMA: yesterday <= slow, today > slow - a fresh cross
+    return [10000, 10000]; // period 50: both rsi_pullback's own SMA check and golden_cross's slow SMA
+  });
+}
+
+// AAPL qualifies under golden_cross but NOT rsi_pullback: RSI 45 is not
+// oversold (rsi_pullback needs <40), while the fast/slow SMAs show a fresh
+// cross (golden_cross's own, unrelated condition). Exists specifically to
+// prove a run's own stored ruleId/ruleParams actually govern its behavior -
+// before this round's fix, every run was silently evaluated against one
+// shared global rule regardless of what it had stored, which this
+// combination would immediately expose (an rsi_pullback run would wrongly
+// enter on a signal that isn't even its own).
+function mockEligibleForGoldenCrossOnly(): void {
+  vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+    new Map([["AAPL", [bar(toCents("105.00"), 1_000_000)]]]),
+  );
+  vi.mocked(fetchQuotes).mockResolvedValue({
+    quotes: new Map([
+      [
+        "AAPL",
+        {
+          symbol: "AAPL",
+          bidCents: toCents("99.50"),
+          askCents: toCents("100.00"),
+          timestamp: new Date(),
+        },
+      ],
+    ]),
+    failedSymbols: [],
+  });
+  vi.mocked(rsi).mockReturnValue([45]); // not oversold - rsi_pullback must NOT fire on this
+  vi.mocked(sma).mockImplementation((_closes, period) => {
+    if (period === 20) return [9900, 10001]; // fast SMA: a fresh cross above the slow SMA
+    return [10000, 10000];
+  });
+}
+
+// AAPL qualifies under breakout_52wk_high_v1 only: RSI 80 fails
+// rsi_pullback, the period-20/50 SMAs are flat (fails golden_cross), and
+// the period-365 rollingHigh/SMA show a genuine new high with a rising
+// trend (breakout's own, unrelated condition). Same isolation-proof intent
+// as mockEligibleForGoldenCrossOnly above, extended to the third family.
+function mockEligibleForBreakoutOnly(): void {
+  vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+    new Map([["AAPL", [bar(toCents("105.00"), 1_000_000)]]]),
+  );
+  vi.mocked(fetchQuotes).mockResolvedValue({
+    quotes: new Map([
+      [
+        "AAPL",
+        {
+          symbol: "AAPL",
+          bidCents: toCents("99.50"),
+          askCents: toCents("100.00"),
+          timestamp: new Date(),
+        },
+      ],
+    ]),
+    failedSymbols: [],
+  });
+  vi.mocked(rsi).mockReturnValue([80]); // not oversold - rsi_pullback must NOT fire on this
+  vi.mocked(sma).mockImplementation((_closes, period) => {
+    if (period === 365) {
+      // buildCandidates reads today's value at .at(-1) and the lagged
+      // value 20 (risingLookbackDays) positions further back at
+      // .at(-21) - needs at least 21 elements for both to resolve.
+      // Lagged (index 0) = 9900, today (index 20) = 10001: rising.
+      return [9900, ...Array(19).fill(9950), 10001];
+    }
+    return [10000, 10000]; // periods 20/50 flat - golden_cross must NOT fire on this
+  });
+  // Yesterday's rolling 365-day high (.at(-2)) = 9800 - today's close
+  // ($105.00 = 10500) exceeds it, a genuine new high.
+  vi.mocked(rollingHigh).mockReturnValue([9800, 10000]);
+}
+
 function mockNoEligibleCandidates(): void {
   vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
     new Map([["AAPL", [bar(toCents("105.00"), 1_000_000)]]]),
@@ -103,6 +221,13 @@ beforeEach(async () => {
   vi.mocked(isApproachingMarketClose).mockReturnValue(false);
   vi.mocked(rsi).mockReset();
   vi.mocked(sma).mockReset();
+  vi.mocked(rollingHigh).mockReset();
+  // Default: no rolling-high data available at all - breakout's own
+  // signal group ends up null (see buildCandidates in bot-runs.ts), the
+  // same "not eligible, not a crash" treatment as any other family with
+  // insufficient history. Tests that need breakout to actually qualify
+  // override this explicitly (see mockEligibleForBreakoutOnly).
+  vi.mocked(rollingHigh).mockReturnValue([]);
   await db.execute(
     sql`truncate table transactions, orders, positions, bot_runs, accounts, limit_order_worker_runs, bot_worker_runs cascade`,
   );
@@ -113,6 +238,7 @@ describe("createBotRun", () => {
     const userId = randomUUID();
     const result = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: 0n,
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -124,6 +250,7 @@ describe("createBotRun", () => {
     const userId = randomUUID();
     const result = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("1000.01") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -135,6 +262,7 @@ describe("createBotRun", () => {
     const userId = randomUUID();
     const result = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "percent", basisPoints: 0 },
@@ -146,6 +274,7 @@ describe("createBotRun", () => {
     const userId = randomUUID();
     const result = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -155,10 +284,22 @@ describe("createBotRun", () => {
 
     const [row] = await db.select().from(botRuns).where(eq(botRuns.id, result.runId));
     expect(row?.status).toBe("selecting");
-    // v2, not v1 - see lib/trading/bot-rule.ts's ACTIVE_RULE_ID/PARAMS and
+    // v2, not v1 - see lib/trading/bot-rule.ts's AVAILABLE_STRATEGIES and
     // STATE.md for why the entry threshold moved from 30 to 40.
     expect(row?.ruleId).toBe("rsi_pullback_uptrend_v2");
     expect(row?.ruleParams).toMatchObject({ rsiEntryThreshold: 40, rsiExitThreshold: 50 });
+  });
+
+  it("rejects an unrecognized rule id, not silently falling back to any default", async () => {
+    const userId = randomUUID();
+    const result = await createBotRun({
+      userId,
+      ruleId: "not_a_real_strategy",
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    expect(result).toEqual({ ok: false, reason: "invalid_rule_id" });
   });
 });
 
@@ -168,6 +309,7 @@ describe("runBotWorker - selection cycle", () => {
     const account = await getOrCreateAccount(userId);
     const created = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -207,6 +349,7 @@ describe("runBotWorker - selection cycle", () => {
     await getOrCreateAccount(userId);
     const created = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -231,6 +374,7 @@ describe("runBotWorker - selection cycle", () => {
     await getOrCreateAccount(userId);
     const created = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("10.00"), // far below AAPL's $100.00 ask
       profitTarget: { type: "dollar", valueCents: toCents("1.00") },
       stopLoss: { type: "dollar", valueCents: toCents("1.00") },
@@ -246,6 +390,75 @@ describe("runBotWorker - selection cycle", () => {
     const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
     expect(run?.status).toBe("failed_no_affordable_candidate");
     expect(run?.closedAt).not.toBeNull();
+  });
+
+  // The direct regression test for this round's fix: before it, every run
+  // was evaluated against one shared global rule no matter what it had
+  // stored in ruleId/ruleParams - two runs with genuinely different rules
+  // would have behaved identically. Here, only golden_cross's own condition
+  // is true for AAPL; rsi_pullback's is deliberately false. If either run
+  // read the wrong rule (or a shared one), the rsi_pullback run would
+  // wrongly enter too.
+  it("each run acts on its OWN stored ruleId/ruleParams, not a shared global rule", async () => {
+    const userId = randomUUID();
+    const rsiPullbackRun = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    const goldenCrossRun = await createBotRun({
+      userId,
+      ruleId: GOLDEN_CROSS_V1_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!rsiPullbackRun.ok || !goldenCrossRun.ok) throw new Error("setup failed");
+
+    mockEligibleForGoldenCrossOnly();
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsEntered).toBe(1);
+
+    const [rsiRow] = await db.select().from(botRuns).where(eq(botRuns.id, rsiPullbackRun.runId));
+    const [goldenRow] = await db.select().from(botRuns).where(eq(botRuns.id, goldenCrossRun.runId));
+    expect(rsiRow?.status).toBe("selecting"); // its own rule genuinely never fired
+    expect(goldenRow?.status).toBe("holding");
+    expect(goldenRow?.selectedSymbol).toBe("AAPL");
+  });
+
+  it("enters a breakout_52wk_high_v1 run on a genuine new 365-day high with a rising SMA, while a sibling rsi_pullback run on the same cycle does not", async () => {
+    const userId = randomUUID();
+    const rsiPullbackRun = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    const breakoutRun = await createBotRun({
+      userId,
+      ruleId: BREAKOUT_52WK_HIGH_V1_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!rsiPullbackRun.ok || !breakoutRun.ok) throw new Error("setup failed");
+
+    mockEligibleForBreakoutOnly();
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsEntered).toBe(1);
+
+    const [rsiRow] = await db.select().from(botRuns).where(eq(botRuns.id, rsiPullbackRun.runId));
+    const [breakoutRow] = await db.select().from(botRuns).where(eq(botRuns.id, breakoutRun.runId));
+    expect(rsiRow?.status).toBe("selecting"); // its own rule genuinely never fired
+    expect(breakoutRow?.status).toBe("holding");
+    expect(breakoutRow?.selectedSymbol).toBe("AAPL");
   });
 
   // Every other test in this file mocks rsi()/sma() directly (see the top
@@ -329,6 +542,7 @@ describe("runBotWorker - selection cycle", () => {
     const account = await getOrCreateAccount(userId);
     const created = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -375,6 +589,7 @@ async function createHoldingRun(
   const account = await getOrCreateAccount(userId);
   const created = await createBotRun({
     userId,
+    ruleId: RSI_PULLBACK_UPTREND_V2_ID,
     capitalCents: toCents("1000.00"),
     profitTarget: { type: "dollar", valueCents: profitTargetValueCents },
     stopLoss: { type: "dollar", valueCents: stopLossValueCents },
@@ -663,6 +878,7 @@ describe("runBotWorker - invocation logging", () => {
     const userId = randomUUID();
     await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -688,6 +904,7 @@ describe("runBotWorker - invocation logging", () => {
     const userId = randomUUID();
     await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("1000.00"),
       profitTarget: { type: "dollar", valueCents: toCents("50.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -709,6 +926,194 @@ describe("runBotWorker - invocation logging", () => {
   });
 });
 
+// Research spike for the multi-strategy proposal (see STATE.md): every
+// bot_run draws from the same account's cash, and once more than one
+// strategy can be active at once, two runs can genuinely compete for it or
+// both land on the same symbol at once. These prove the underlying
+// account/position mutation layer already handles both cases correctly
+// TODAY, using tryEnterBotRun's real lock discipline (bot_run row, then
+// account row - same order documented as an invariant elsewhere in this
+// file) - not a new mechanism built for multi-strategy, just confirmed to
+// already generalize to it. Neither test depends on a run's own ruleId
+// actually changing its entry/exit behavior, because nothing reads
+// ruleId/ruleParams per-run yet (see the proposal) - both runs behave
+// identically under ACTIVE_RULE_PARAMS regardless of what's stored.
+describe("multiple concurrent bot runs sharing one account", () => {
+  // A first attempt at this test used two genuinely concurrent
+  // runBotWorker() calls, each seeing both runs and processing them
+  // sequentially within itself - and it passed even after the account-row
+  // lock in tryEnterBotRun was deliberately removed. Root cause, found by
+  // doing exactly what this file's own Gotchas call for (break the thing
+  // being protected and check whether the test notices, not just reason
+  // that it should): with only two runs and no ORDER BY, both invocations
+  // visit them in the same order, so the bot_run-row lock alone ends up
+  // serializing the two entries indirectly - by the time either invocation
+  // reaches the second run, the first run's account update has *already*
+  // committed, so even a plain unlocked read sees the correct post-commit
+  // balance. That topology never actually forces two DIFFERENT runs'
+  // account-mutation sections to overlap. Replaced with the same direct,
+  // deterministic technique orders.test.ts already uses to prove Postgres
+  // row locking ("a second SELECT ... FOR UPDATE on the same row blocks
+  // until the first transaction ends"): hold the account row locked (and
+  // spending from it) via a raw connection, and confirm runBotWorker's own
+  // entry attempt genuinely blocks on that lock and then correctly re-reads
+  // the post-hold balance, rather than racing past it or working from a
+  // stale read.
+  it("a bot entry genuinely blocks on the account row's lock, held by a concurrent spender, and correctly sees the post-hold balance afterward", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId); // $100,000.00 starting cash
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error("Missing TEST_DATABASE_URL");
+    }
+
+    // Nominally sized to fully afford $80,000 (800 shares @ $100.00 ask) -
+    // affordable against the account's real starting balance, but NOT
+    // against the $40,000 that will actually remain once the raw
+    // connection's held transaction has spent $60,000 of it. If the entry
+    // incorrectly used a stale pre-hold balance (or didn't wait for the
+    // lock at all), it would wrongly succeed; if it correctly waits and
+    // re-reads, it must reject as insufficient_funds.
+    const run = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("80000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("2000.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("2000.00") },
+    });
+    if (!run.ok) throw new Error("setup failed");
+
+    mockEligibleCandidate(); // AAPL at ask $100.00 / bid $99.50
+
+    const rawSql = postgres(testDatabaseUrl, { prepare: false });
+    try {
+      const start = Date.now();
+      let workerStartedAfterMs: number | null = null;
+
+      const rawHold = rawSql.begin(async (tx) => {
+        await tx`select * from accounts where id = ${account.id} for update`;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        // Simulates a concurrent spend - another bot run's entry, or a
+        // human placing an ordinary trade - while this transaction still
+        // holds the lock. Whatever the account looks like when this
+        // commits is what runBotWorker's own entry attempt must see, not
+        // whatever it looked like before this started. Records a matching
+        // transactions row too (a real concurrent spend always would),
+        // so assertLedgerBalances below stays a meaningful check rather
+        // than something this raw simulation has to skip.
+        // postgres.js's raw tagged-template query has no bigint overload -
+        // pass every cents value through as a string, same convention this
+        // app already uses at every other bigint-crossing boundary.
+        const spendCents = toCents("60000.00");
+        const newBalance = (account.cashCents - spendCents).toString();
+        await tx`update accounts set cash_cents = ${newBalance} where id = ${account.id}`;
+        await tx`insert into transactions (account_id, kind, amount_cents, balance_after_cents)
+                  values (${account.id}, 'buy', ${(-spendCents).toString()}, ${newBalance})`;
+      });
+
+      // Give the raw hold a head start so it acquires the lock first.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workerRun = (async () => {
+        workerStartedAfterMs = Date.now() - start;
+        return runBotWorker(new Date());
+      })();
+
+      const [, outcome] = await Promise.all([rawHold, workerRun]);
+      if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+
+      if (workerStartedAfterMs === null) throw new Error("worker never started");
+      // Started well before the 300ms hold released (proving it was
+      // actually blocked waiting on the lock, not conveniently scheduled
+      // to run after) - the real proof is in the outcome below, not this
+      // timing alone.
+      expect(workerStartedAfterMs).toBeLessThan(300);
+
+      const [updatedRun] = await db.select().from(botRuns).where(eq(botRuns.id, run.runId));
+      // Correctly rejected - $40,000 real remaining cash can't cover the
+      // $80,000 fill, which it could only know by waiting for the lock and
+      // re-reading, not by working from the $100,000 balance that existed
+      // when this run was created or when the worker cycle started.
+      expect(updatedRun?.status).toBe("selecting");
+
+      const [updatedAccount] = await db.select().from(accounts).where(eq(accounts.id, account.id));
+      // Debited exactly the raw hold's $60,000 - not further debited by a
+      // bot entry that should have been rejected, not restored either.
+      expect(account.cashCents - (updatedAccount?.cashCents ?? 0n)).toBe(toCents("60000.00"));
+
+      await assertLedgerBalances(account.id);
+    } finally {
+      await rawSql.end();
+    }
+  });
+
+  it("two different runs entering the same symbol at once produce one correctly-merged position, with each run's own entry bookkeeping staying independent", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    // Plenty of cash for both this time - the property under test here is
+    // position-merging correctness, not cash contention (see the sibling
+    // test above for that).
+    //
+    // Genuinely different rule ids, each chosen at creation (now that
+    // createBotRun actually accepts and validates one) - the real scenario
+    // this guards against is two DIFFERENT strategies each independently
+    // deciding AAPL qualifies right now. This also exercises the
+    // per-ruleId grouping in runSelectionCycle for real: two distinct
+    // ranked lists, computed from two distinct parsed ruleParams, both
+    // needing to independently include AAPL - not just two runs sharing
+    // one shared list under different labels. The account/position
+    // mutation layer neither reads nor cares about ruleId, which is what
+    // this test confirms still holds once two genuinely different rules
+    // both fire on the same symbol at once.
+    const runA = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("10000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("500.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("300.00") },
+    });
+    const runB = await createBotRun({
+      userId,
+      ruleId: GOLDEN_CROSS_V1_ID,
+      capitalCents: toCents("20000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("500.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("300.00") },
+    });
+    if (!runA.ok || !runB.ok) throw new Error("setup failed");
+
+    mockEligibleForBothRuleFamilies(); // AAPL qualifies under rsi_pullback AND golden_cross at once
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+
+    const [rowA] = await db.select().from(botRuns).where(eq(botRuns.id, runA.runId));
+    const [rowB] = await db.select().from(botRuns).where(eq(botRuns.id, runB.runId));
+    expect(rowA?.status).toBe("holding");
+    expect(rowB?.status).toBe("holding");
+
+    // runA: $10,000 / $100.00 = 100 shares. runB: $20,000 / $100.00 = 200
+    // shares. Each run's OWN bookkeeping reflects only its own fill.
+    expect(rowA?.entryQuantity).toBe(100);
+    expect(rowA?.entryTotalCents).toBe(toCents("10000.00"));
+    expect(rowB?.entryQuantity).toBe(200);
+    expect(rowB?.entryTotalCents).toBe(toCents("20000.00"));
+
+    // One shared position, not two - correctly merged: 300 shares total,
+    // both bought at the same $100.00 ask, so the average cost is still
+    // exactly $100.00.
+    const positionRows = await db
+      .select()
+      .from(positions)
+      .where(and(eq(positions.accountId, account.id), eq(positions.symbol, "AAPL")));
+    expect(positionRows).toHaveLength(1);
+    expect(positionRows[0]?.quantity).toBe(300);
+    expect(positionRows[0]?.avgCostCents).toBe(toCents("100.00"));
+
+    await assertLedgerBalances(account.id);
+  });
+});
+
 describe("getBotRunsForAccount", () => {
   it("returns an account's runs, newest first", async () => {
     const userId = randomUUID();
@@ -717,12 +1122,14 @@ describe("getBotRunsForAccount", () => {
 
     const first = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("500.00"),
       profitTarget: { type: "dollar", valueCents: toCents("20.00") },
       stopLoss: { type: "dollar", valueCents: toCents("20.00") },
     });
     const second = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("700.00"),
       profitTarget: { type: "dollar", valueCents: toCents("30.00") },
       stopLoss: { type: "dollar", valueCents: toCents("30.00") },
@@ -742,6 +1149,7 @@ describe("getActiveBotRunCount", () => {
     mockNoEligibleCandidates();
     const stillSelecting = await createBotRun({
       userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
       capitalCents: toCents("500.00"),
       profitTarget: { type: "dollar", valueCents: toCents("20.00") },
       stopLoss: { type: "dollar", valueCents: toCents("20.00") },

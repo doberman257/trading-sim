@@ -111,6 +111,37 @@ export function rsi(
   return result;
 }
 
+// Highest close in the trailing `period` values, index `i` included -
+// matches sma/ema/rsi's own trailing-window convention exactly (a "20-day
+// high" at index i means the max of indices [i-19, i], not [i-20, i-1]).
+// A breakout rule comparing "is today's close a new high" reads this
+// result at index i-1 (yesterday's trailing high, excluding today) against
+// today's own close - the same shape as a golden-cross rule comparing two
+// moving averages at consecutive indices. Deciding what counts as "a new
+// high" is the rule's job, not this function's - same separation sma/ema
+// already keep from ruleShouldEnter's own comparisons.
+//
+// O(n * period), not the O(n) a monotonic-deque rolling-max would give -
+// deliberately not worth the extra complexity at this app's real scale
+// (period is a small fixed window like 20, n is at most a few thousand
+// bars), the same tradeoff call this file already makes elsewhere (sma
+// itself is O(n) via a sliding sum only because a sum, unlike a max, is
+// cheap to update incrementally without extra bookkeeping).
+export function rollingHigh(values: readonly Cents[], period: number): (number | null)[] {
+  const result: (number | null)[] = new Array(values.length).fill(null);
+
+  for (let i = period - 1; i < values.length; i++) {
+    let max = -Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      const value = Number(values[j]);
+      if (value > max) max = value;
+    }
+    result[i] = max;
+  }
+
+  return result;
+}
+
 function rsiFromAverages(avgGain: number, avgLoss: number): number {
   // A perfectly flat run (every delta exactly zero) has no gains and no
   // losses to compare - conventionally read as "no momentum either way,"

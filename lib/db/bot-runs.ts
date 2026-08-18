@@ -3,7 +3,16 @@ import { fetchDailyBarsForSymbols, fetchQuotes, type Bar } from "../market/alpac
 import { BOT_WATCHLIST_SYMBOLS } from "../market/bot-watchlist";
 import { isApproachingMarketClose } from "../trading/bot-day-expiry";
 import { computeBotRunRealizedPnl } from "../trading/bot-pnl";
-import { ACTIVE_RULE_ID, ACTIVE_RULE_PARAMS, ruleShouldExit } from "../trading/bot-rule";
+import {
+  AVAILABLE_STRATEGIES,
+  BREAKOUT_52WK_HIGH_V1_PARAMS,
+  GOLDEN_CROSS_V1_PARAMS,
+  parseRuleParams,
+  RSI_PULLBACK_UPTREND_V2_PARAMS,
+  ruleShouldExit,
+  type BotRuleParams,
+  type RuleExitEvaluation,
+} from "../trading/bot-rule";
 import { rankEligibleBotCandidates, type BotCandidate } from "../trading/bot-selection";
 import { computeBotOrderQuantity } from "../trading/bot-sizing";
 import {
@@ -16,7 +25,7 @@ import {
 import { executeMarketOrder } from "../trading/execute";
 import { canPlaceLimitOrder } from "../trading/limit-reservation";
 import type { Cents } from "../trading/money";
-import { rsi, sma } from "../trading/indicators";
+import { rollingHigh, rsi, sma } from "../trading/indicators";
 import { valuePosition } from "../trading/pnl";
 import type { AccountState, Quote } from "../trading/types";
 import { getOrCreateAccount, loadAccountState } from "./accounts";
@@ -29,12 +38,20 @@ import {
 } from "./orders";
 import { accounts, botRuns, botWorkerRuns, orders } from "./schema";
 
-// Comfortably covers SMA(50)'s ~70-calendar-day need (an estimate scaled
-// from this app's own empirically-confirmed 20-trading-day/~30-calendar-day
-// data point for the bars endpoint - see STATE.md - not independently
-// re-verified at this specific lookback). At 12 watchlist symbols this is
-// nowhere near the endpoint's 10,000-row cap either way.
-const SELECTION_LOOKBACK_DAYS = 100;
+// Must comfortably cover breakout_52wk_high_v1's own need - the largest of
+// any rule family's: a 365-trading-day rolling high/SMA PLUS a 20-trading-day
+// rising-SMA lookback, so 385 trading days minimum, for both the selection
+// cycle's candidate-building AND the monitoring cycle's own exit check on an
+// already-holding breakout run (both call fetchDailyBarsForSymbols with this
+// same constant). Scaled via this app's own empirically-confirmed
+// 20-trading-day/~30-calendar-day ratio for the bars endpoint (see STATE.md)
+// - 385 trading days * 1.5 =~ 578 calendar days - with real margin on top for
+// holidays/weekends variance, not cut close to the theoretical minimum.
+// `fetchDailyBarsForSymbols`'s own chunking already handles requests this
+// size for the full ~517-symbol watchlist (proven during the breakout
+// historical scan, which fetched 1000 calendar days across the same
+// universe), so this is a correctness floor, not a request-size risk.
+const SELECTION_LOOKBACK_DAYS = 650;
 
 type BotRunRow = typeof botRuns.$inferSelect;
 
@@ -76,6 +93,7 @@ function columnsToTargetConfig(
 
 export type CreateBotRunInput = {
   userId: string;
+  ruleId: string;
   capitalCents: Cents;
   profitTarget: TargetConfig;
   stopLoss: TargetConfig;
@@ -84,7 +102,10 @@ export type CreateBotRunInput = {
 
 export type CreateBotRunResult =
   | { ok: true; runId: string }
-  | { ok: false; reason: "invalid_capital" | "invalid_profit_target" | "invalid_stop_loss" };
+  | {
+      ok: false;
+      reason: "invalid_capital" | "invalid_profit_target" | "invalid_stop_loss" | "invalid_rule_id";
+    };
 
 // Validates and inserts a new "selecting" run - does not select a symbol or
 // place any order itself. The worker's own selection cycle (see
@@ -93,6 +114,10 @@ export type CreateBotRunResult =
 // (see app/api/bot/runs/route.ts), but that is a caller choice, not
 // something this function does on its own.
 export async function createBotRun(input: CreateBotRunInput): Promise<CreateBotRunResult> {
+  const strategy = AVAILABLE_STRATEGIES[input.ruleId];
+  if (!strategy) {
+    return { ok: false, reason: "invalid_rule_id" };
+  }
   if (input.capitalCents <= 0n) {
     return { ok: false, reason: "invalid_capital" };
   }
@@ -111,8 +136,8 @@ export async function createBotRun(input: CreateBotRunInput): Promise<CreateBotR
     .insert(botRuns)
     .values({
       accountId: account.id,
-      ruleId: ACTIVE_RULE_ID,
-      ruleParams: ACTIVE_RULE_PARAMS,
+      ruleId: input.ruleId,
+      ruleParams: strategy.params,
       capitalCents: input.capitalCents,
       profitTargetType: profitTargetColumns.type,
       profitTargetValueCents: profitTargetColumns.valueCents,
@@ -185,6 +210,23 @@ export async function getActiveBotRunCount(accountId: string): Promise<number> {
 // null when there isn't enough history yet (a symbol newly added to the
 // watchlist) or no live quote right now, in which case it's simply excluded
 // from candidates this cycle rather than treated as an error.
+//
+// All three rule families' signals are computed unconditionally for every
+// candidate, using each family's one currently-registered period set
+// (RSI_PULLBACK_UPTREND_V2_PARAMS / GOLDEN_CROSS_V1_PARAMS /
+// BREAKOUT_52WK_HIGH_V1_PARAMS) - see BotCandidate's own comment in
+// bot-selection.ts for why this is a plain data bag rather than computed
+// lazily per rule-in-use. v1's rsi_pullback params share v2's
+// rsiPeriod/smaPeriod (only the entry threshold differs), so these same
+// signals correctly serve any run still recorded under v1 too.
+//
+// Each family's own group is null, independently, when there isn't enough
+// bar history yet for THAT family's own indicators (golden_cross's
+// SMA(50)-yesterday needs one more day of history than rsi_pullback's
+// SMA(50)-today does, breakout's own SMA(365)-lagged needs 20 more days on
+// top of that) - a candidate is only dropped entirely when NO family has
+// usable data, not whenever any one alone is incomplete (see BotCandidate's
+// own comment in bot-selection.ts for why that distinction matters).
 function buildCandidates(
   symbols: readonly string[],
   barsMap: ReadonlyMap<string, Bar[]>,
@@ -198,28 +240,51 @@ function buildCandidates(
     if (!bars || bars.length === 0 || !quote) continue;
 
     const closes = bars.map((bar) => bar.closeCents);
-    const latestRsi = rsi(closes, ACTIVE_RULE_PARAMS.rsiPeriod).at(-1);
-    const latestSma = sma(closes, ACTIVE_RULE_PARAMS.smaPeriod).at(-1);
     const latestClose = closes.at(-1);
     const latestVolume = bars.at(-1)?.volume;
+    if (latestClose === undefined || latestVolume === undefined) continue;
 
-    if (
-      latestRsi == null ||
-      latestSma == null ||
-      latestClose === undefined ||
-      latestVolume === undefined
-    ) {
-      continue;
-    }
+    const latestRsi = rsi(closes, RSI_PULLBACK_UPTREND_V2_PARAMS.rsiPeriod).at(-1);
+    const latestSma = sma(closes, RSI_PULLBACK_UPTREND_V2_PARAMS.smaPeriod).at(-1);
+    const rsiPullback =
+      latestRsi != null && latestSma != null ? { rsi: latestRsi, sma: latestSma } : null;
+
+    const fastSmaSeries = sma(closes, GOLDEN_CROSS_V1_PARAMS.fastPeriod);
+    const slowSmaSeries = sma(closes, GOLDEN_CROSS_V1_PARAMS.slowPeriod);
+    const smaFast = fastSmaSeries.at(-1);
+    const smaFastYesterday = fastSmaSeries.at(-2);
+    const smaSlow = slowSmaSeries.at(-1);
+    const smaSlowYesterday = slowSmaSeries.at(-2);
+    const goldenCross =
+      smaFast != null && smaFastYesterday != null && smaSlow != null && smaSlowYesterday != null
+        ? { smaFast, smaFastYesterday, smaSlow, smaSlowYesterday }
+        : null;
+
+    // priorHigh is YESTERDAY's rolling high (the window ending the day
+    // before today), not today's - today's own close is what must clear
+    // it, so including today's own bar in the high it's compared against
+    // would make a breakout partly measure itself.
+    const highSeries = rollingHigh(closes, BREAKOUT_52WK_HIGH_V1_PARAMS.breakoutWindowDays);
+    const priorHigh = highSeries.at(-2);
+    const breakoutSmaSeries = sma(closes, BREAKOUT_52WK_HIGH_V1_PARAMS.breakoutWindowDays);
+    const smaToday = breakoutSmaSeries.at(-1);
+    const smaLagged = breakoutSmaSeries.at(-1 - BREAKOUT_52WK_HIGH_V1_PARAMS.risingLookbackDays);
+    const breakout =
+      priorHigh != null && smaToday != null && smaLagged != null
+        ? { priorHigh, smaToday, smaLagged }
+        : null;
+
+    if (!rsiPullback && !goldenCross && !breakout) continue;
 
     candidates.push({
       symbol,
       bidCents: quote.bidCents,
       askCents: quote.askCents,
       volume: latestVolume,
-      rsi: latestRsi,
       price: latestClose,
-      sma: latestSma,
+      rsiPullback,
+      goldenCross,
+      breakout,
     });
   }
 
@@ -324,15 +389,27 @@ async function runSelectionCycle(
     fetchDailyBarsForSymbols([...BOT_WATCHLIST_SYMBOLS], SELECTION_LOOKBACK_DAYS),
     fetchQuotes([...BOT_WATCHLIST_SYMBOLS]),
   ]);
-  const ranked = rankEligibleBotCandidates(
-    buildCandidates(BOT_WATCHLIST_SYMBOLS, barsMap, quotesResult.quotes),
-    ACTIVE_RULE_PARAMS,
-  );
+  const candidates = buildCandidates(BOT_WATCHLIST_SYMBOLS, barsMap, quotesResult.quotes);
+
+  // Each run picks its own rule at creation time (see createBotRun) and
+  // that choice must actually govern what it does here - ranking every
+  // selecting run against one shared global rule (the bug this round
+  // fixes) would mean a run's stored ruleId/ruleParams were pure decoration.
+  // Grouped by distinct ruleId, not recomputed per run: two runs sharing
+  // the same rule share the same ranked list, computed once.
+  const rankedByRuleId = new Map<string, BotCandidate[]>();
+  for (const run of selectingRuns) {
+    if (rankedByRuleId.has(run.ruleId)) continue;
+    const params = parseRuleParams(run.ruleParams);
+    if (!params) continue; // unparseable/corrupt row - never matches any candidate this cycle
+    rankedByRuleId.set(run.ruleId, rankEligibleBotCandidates(candidates, params));
+  }
 
   let entered = 0;
   let failedNoAffordableCandidate = 0;
 
   for (const run of selectingRuns) {
+    const ranked = rankedByRuleId.get(run.ruleId) ?? [];
     const outcome = await attemptEntryForRun(run, ranked, quotesResult.quotes, now);
     if (outcome === "entered") entered++;
     if (outcome === "failed_no_affordable_candidate") failedNoAffordableCandidate++;
@@ -582,6 +659,39 @@ async function runMonitoringCycle(now: Date): Promise<{ monitored: number; close
   return { monitored: holdingRuns.length, closed };
 }
 
+// Builds the one RuleExitEvaluation a holding run's own rule needs, from
+// freshly fetched bars - the exit-side counterpart to bot-selection.ts's
+// buildEvaluation, but computed lazily per holding run (not unconditionally
+// for the whole watchlist like buildCandidates) since only the one symbol
+// each run actually holds matters here. Returns null when there isn't
+// enough bar history for this rule's own period yet - the same "skip this
+// cycle, try again next time" treatment buildCandidates gives an
+// insufficient-history candidate, not a crash.
+function computeRuleExitEvaluation(
+  params: BotRuleParams,
+  closes: readonly Cents[],
+): RuleExitEvaluation | null {
+  switch (params.kind) {
+    case "rsi_pullback": {
+      const latestRsi = rsi(closes, params.rsiPeriod).at(-1);
+      if (latestRsi == null) return null;
+      return { kind: "rsi_pullback", params, signals: { rsi: latestRsi } };
+    }
+    case "golden_cross": {
+      const smaFast = sma(closes, params.fastPeriod).at(-1);
+      const smaSlow = sma(closes, params.slowPeriod).at(-1);
+      if (smaFast == null || smaSlow == null) return null;
+      return { kind: "golden_cross", signals: { smaFast, smaSlow } };
+    }
+    case "breakout": {
+      const smaToday = sma(closes, params.exitSmaPeriod).at(-1);
+      const price = closes.at(-1);
+      if (smaToday == null || price === undefined) return null;
+      return { kind: "breakout", signals: { price, sma: smaToday } };
+    }
+  }
+}
+
 async function monitorOneBotRun(
   run: BotRunRow,
   barsMap: ReadonlyMap<string, Bar[]>,
@@ -652,8 +762,9 @@ async function monitorOneBotRun(
   } else {
     const bars = barsMap.get(selectedSymbol);
     const closes = bars?.map((bar) => bar.closeCents) ?? [];
-    const latestRsi = rsi(closes, ACTIVE_RULE_PARAMS.rsiPeriod).at(-1);
-    if (latestRsi != null && ruleShouldExit({ rsi: latestRsi }, ACTIVE_RULE_PARAMS)) {
+    const ruleParams = parseRuleParams(run.ruleParams);
+    const evaluation = ruleParams ? computeRuleExitEvaluation(ruleParams, closes) : null;
+    if (evaluation && ruleShouldExit(evaluation)) {
       exitReason = "closed_rule_exit";
     }
   }
