@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { Delta } from "./Delta";
+import { describeBotRuleLabel, describeBotRuleParams } from "@/lib/trading/bot-rule";
 import { formatCents } from "@/lib/trading/money";
 import type { RejectReason } from "@/lib/trading/types";
 
@@ -21,6 +22,10 @@ export type BotRunItem = {
   id: string;
   status: BotRunStatus;
   ruleId: string;
+  // Raw, unparsed JSON, same as BotRuleStatsItem's own ruleParams
+  // (BotStatsPanel.tsx) - describeBotRuleLabel/describeBotRuleParams turn
+  // this into display text, not this component directly.
+  ruleParams: unknown;
   // Cross the Server -> Client boundary as strings, same convention as
   // every other money value in this app - see OrderTicket's cashCentsString.
   capitalCents: string;
@@ -125,6 +130,24 @@ function cancelOutcomeMessage(result: CancelBotRunApiResult): string {
   }
 }
 
+// A quiet, neutral tag - not a per-strategy accent color. Three strategies
+// is a small, bounded set (like the chart's own SMA/EMA overlay lines - see
+// the trading-ui-design skill's own note on when a new token is warranted),
+// but unlike those overlays, badges in a vertical list are never rendered
+// overlapping each other, so there's no real legibility need for color to
+// separate them the way overlapping chart lines do - the label TEXT itself
+// already disambiguates at a glance. Inventing a third categorical color
+// axis (alongside gain/loss and warn) for a distinction that reads fine in
+// plain text would spend one of this system's few reserved colors on
+// decoration, which the skill's own core principle rules out.
+function StrategyBadge({ label }: { label: string }) {
+  return (
+    <span className="border-default bg-elevated text-muted shrink-0 rounded-md border px-1.5 py-0.5 text-xs font-normal">
+      {label}
+    </span>
+  );
+}
+
 // This app's own trading engine never uses an LLM to decide anything - see
 // CLAUDE.md's "the autonomous bot never decides" rule - so every row here
 // traces to the one stated rule (ruleId) shown alongside it, not a vague
@@ -180,20 +203,26 @@ export function BotRunsPanel({ runs }: { runs: BotRunItem[] }) {
               const realizedPnlCents =
                 run.realizedPnlCents !== null ? BigInt(run.realizedPnlCents) : null;
               const cancellable = run.status === "selecting" || run.status === "holding";
+              const strategyLabel = describeBotRuleLabel(run.ruleId, run.ruleParams);
+              const paramsSummary = describeBotRuleParams(run.ruleParams);
               return (
                 <div
                   key={run.id}
                   className="border-default bg-elevated flex items-center justify-between gap-3 rounded-md border p-3"
                 >
                   <div>
-                    <div className="text-fg text-sm font-medium">
-                      {run.selectedSymbol ?? "No symbol yet"} - {statusLabel(run.status)}
+                    <div className="text-fg flex flex-wrap items-center gap-2 text-sm font-medium">
+                      <span>
+                        {run.selectedSymbol ?? "No symbol yet"} - {statusLabel(run.status)}
+                      </span>
+                      <StrategyBadge label={strategyLabel} />
                     </div>
                     <div className="text-subtle mt-0.5 text-xs">
                       Capital ${formatCents(BigInt(run.capitalCents))}
                       {run.entryTotalCents !== null &&
                         ` · Entry $${formatCents(BigInt(run.entryTotalCents))}`}
                       {run.entryQuantity !== null && ` (${run.entryQuantity} sh)`}
+                      {paramsSummary && ` · ${paramsSummary}`}
                     </div>
                     {messageByRunId[run.id] && (
                       <p className="text-warn mt-1 text-xs">{messageByRunId[run.id]}</p>

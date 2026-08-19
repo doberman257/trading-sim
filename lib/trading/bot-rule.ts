@@ -335,3 +335,67 @@ export function parseRuleParams(raw: unknown): BotRuleParams | null {
   const result = BotRuleParamsSchema.safeParse(inferLegacyKind(raw));
   return result.success ? result.data : null;
 }
+
+// A generic, per-FAMILY label - independent of AVAILABLE_STRATEGIES' own
+// labels, which name a specific, currently-choosable VERSION ("RSI
+// Pullback" is v2's own label). Exists so a run recorded under a
+// superseded id (v1, still valid to look at - see
+// RSI_PULLBACK_UPTREND_V1_ID's own header comment - just no longer
+// registered) still gets a real, readable label from describeBotRuleLabel
+// below, instead of falling all the way back to a raw ruleId string.
+function describeRuleKindLabel(kind: BotRuleParams["kind"]): string {
+  switch (kind) {
+    case "rsi_pullback":
+      return "RSI Pullback";
+    case "golden_cross":
+      return "Golden Cross";
+    case "breakout":
+      // Matches AVAILABLE_STRATEGIES' own registered label for
+      // breakout_52wk_high_v1 exactly - this fallback only ever fires for
+      // an unregistered id, but keeping the wording identical means a
+      // future superseded breakout id reads the same as the current one,
+      // the same consistency rsi_pullback's v1-vs-v2 fallback already has.
+      return "52-Week High Breakout";
+  }
+}
+
+// The human-readable strategy label for one bot run - prefers
+// AVAILABLE_STRATEGIES' own curated label when ruleId is still a live,
+// choosable strategy (every current run), falling back to a generic
+// per-family label (describeRuleKindLabel above) derived from the run's
+// own stored ruleParams for a superseded id that predates this round's
+// registry. Falls back to the raw ruleId itself only if ruleParams can't
+// be parsed at all - the same "never crash on a bad row, show something
+// honest instead" discipline parseRuleParams already established.
+export function describeBotRuleLabel(ruleId: string, ruleParams: unknown): string {
+  const registered = AVAILABLE_STRATEGIES[ruleId];
+  if (registered) {
+    return registered.label;
+  }
+
+  const parsed = parseRuleParams(ruleParams);
+  return parsed ? describeRuleKindLabel(parsed.kind) : ruleId;
+}
+
+// A compact, per-run summary of a rule's own numeric params - "RSI<40,
+// SMA(50)" - distinct from AVAILABLE_STRATEGIES' own `description` (a full
+// sentence meant for the strategy PICKER, not a per-run subtitle). Useful
+// anywhere multiple runs or rule variants sit in one list and need to be
+// told apart at a glance (BotRunsPanel, BotStatsPanel) - and once a future
+// version bump (a v3, say) ships alongside v2 in the same list, this is
+// what distinguishes them without needing its own bespoke wording added at
+// that point. Returns null (never throws) when ruleParams can't be parsed,
+// same discipline as parseRuleParams/describeBotRuleLabel above.
+export function describeBotRuleParams(ruleParams: unknown): string | null {
+  const parsed = parseRuleParams(ruleParams);
+  if (!parsed) return null;
+
+  switch (parsed.kind) {
+    case "rsi_pullback":
+      return `RSI<${parsed.rsiEntryThreshold}, SMA(${parsed.smaPeriod})`;
+    case "golden_cross":
+      return `SMA(${parsed.fastPeriod})×SMA(${parsed.slowPeriod})`;
+    case "breakout":
+      return `${parsed.breakoutWindowDays}d high, SMA rising ${parsed.risingLookbackDays}d`;
+  }
+}

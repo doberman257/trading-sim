@@ -1,3 +1,4 @@
+import { describeBotRuleLabel, describeBotRuleParams } from "@/lib/trading/bot-rule";
 import { formatCents, type Cents } from "@/lib/trading/money";
 
 // No "use client" here - this component has no interactivity, so it stays
@@ -16,13 +17,6 @@ export type BotRuleStatsItem = {
   avgWinCents: Cents | null;
   avgLossCents: Cents | null;
 };
-
-function formatRuleParams(params: unknown): string {
-  if (params === null || typeof params !== "object") return "";
-  return Object.entries(params as Record<string, unknown>)
-    .map(([key, value]) => `${key}=${String(value)}`)
-    .join(", ");
-}
 
 // "The actual point of the project," per the design brief - answers,
 // honestly, whether this rule shows any real edge or is statistically
@@ -45,11 +39,15 @@ export function BotStatsPanel({ stats }: { stats: BotRuleStatsItem[] }) {
           <div className="flex flex-col gap-3">
             {stats.map((row) => (
               <div
-                key={`${row.ruleId}:${formatRuleParams(row.ruleParams)}`}
+                key={`${row.ruleId}:${JSON.stringify(row.ruleParams)}`}
                 className="border-default bg-elevated rounded-md border p-3"
               >
-                <div className="text-fg text-sm font-medium">{row.ruleId}</div>
-                <div className="text-subtle text-xs">{formatRuleParams(row.ruleParams)}</div>
+                <div className="text-fg text-sm font-medium">
+                  {describeBotRuleLabel(row.ruleId, row.ruleParams)}
+                </div>
+                <div className="text-subtle text-xs">
+                  {describeBotRuleParams(row.ruleParams) ?? ""}
+                </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <Stat label="Sample size" value={String(row.sampleSize)} />
                   <Stat label="Win rate" value={`${(row.winRate * 100).toFixed(1)}%`} />
