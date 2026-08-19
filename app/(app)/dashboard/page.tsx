@@ -151,6 +151,7 @@ export default async function DashboardPage() {
               id: run.id,
               status: run.status,
               ruleId: run.ruleId,
+              ruleParams: run.ruleParams,
               capitalCents: run.capitalCents.toString(),
               selectedSymbol: run.selectedSymbol,
               entryTotalCents: run.entryTotalCents?.toString() ?? null,

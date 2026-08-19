@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  BREAKOUT_52WK_HIGH_V1_ID,
   BREAKOUT_52WK_HIGH_V1_PARAMS,
+  describeBotRuleLabel,
+  describeBotRuleParams,
+  GOLDEN_CROSS_V1_ID,
   GOLDEN_CROSS_V1_PARAMS,
   parseRuleParams,
+  RSI_PULLBACK_UPTREND_V1_ID,
   RSI_PULLBACK_UPTREND_V1_PARAMS,
+  RSI_PULLBACK_UPTREND_V2_ID,
   RSI_PULLBACK_UPTREND_V2_PARAMS,
   ruleShouldEnter,
   ruleShouldExit,
@@ -292,5 +298,53 @@ describe("parseRuleParams", () => {
     expect(parseRuleParams({ garbage: true })).toBeNull();
     expect(parseRuleParams(null)).toBeNull();
     expect(parseRuleParams("not even an object")).toBeNull();
+  });
+});
+
+describe("describeBotRuleLabel", () => {
+  it("uses AVAILABLE_STRATEGIES' own curated label for a live, registered ruleId", () => {
+    expect(describeBotRuleLabel(RSI_PULLBACK_UPTREND_V2_ID, RSI_PULLBACK_UPTREND_V2_PARAMS)).toBe(
+      "RSI Pullback",
+    );
+    expect(describeBotRuleLabel(GOLDEN_CROSS_V1_ID, GOLDEN_CROSS_V1_PARAMS)).toBe("Golden Cross");
+    expect(describeBotRuleLabel(BREAKOUT_52WK_HIGH_V1_ID, BREAKOUT_52WK_HIGH_V1_PARAMS)).toBe(
+      "52-Week High Breakout",
+    );
+  });
+
+  // v1 is real, current production data (see the two real "selecting" runs
+  // still recorded under it as of this round) - not a hypothetical case.
+  it("falls back to a generic per-family label for a superseded, unregistered ruleId like v1", () => {
+    expect(describeBotRuleLabel(RSI_PULLBACK_UPTREND_V1_ID, RSI_PULLBACK_UPTREND_V1_PARAMS)).toBe(
+      "RSI Pullback",
+    );
+  });
+
+  it("infers the right family even from a legacy stored object with no kind field", () => {
+    const legacy = { rsiPeriod: 14, rsiEntryThreshold: 30, rsiExitThreshold: 50, smaPeriod: 50 };
+    expect(describeBotRuleLabel("some_old_unregistered_id", legacy)).toBe("RSI Pullback");
+  });
+
+  it("falls back to the raw ruleId itself when ruleParams can't be parsed at all", () => {
+    expect(describeBotRuleLabel("some_corrupt_row", { garbage: true })).toBe("some_corrupt_row");
+  });
+});
+
+describe("describeBotRuleParams", () => {
+  it("summarizes rsi_pullback params", () => {
+    expect(describeBotRuleParams(RSI_PULLBACK_UPTREND_V2_PARAMS)).toBe("RSI<40, SMA(50)");
+  });
+
+  it("summarizes golden_cross params", () => {
+    expect(describeBotRuleParams(GOLDEN_CROSS_V1_PARAMS)).toBe("SMA(20)×SMA(50)");
+  });
+
+  it("summarizes breakout params", () => {
+    expect(describeBotRuleParams(BREAKOUT_52WK_HIGH_V1_PARAMS)).toBe("365d high, SMA rising 20d");
+  });
+
+  it("returns null, not a throw, for something unparseable", () => {
+    expect(describeBotRuleParams({ garbage: true })).toBeNull();
+    expect(describeBotRuleParams(null)).toBeNull();
   });
 });

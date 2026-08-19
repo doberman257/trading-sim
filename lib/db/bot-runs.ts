@@ -166,6 +166,11 @@ export type BotRunForDisplay = {
   id: string;
   status: BotRunRow["status"];
   ruleId: string;
+  // Raw, unparsed JSON - describeBotRuleLabel/describeBotRuleParams
+  // (lib/trading/bot-rule.ts) are what turn this into display text, same
+  // "parse at the point of use, not at the point of storage" discipline
+  // BotRuleStats (lib/db/bot-stats.ts) already applies to this same column.
+  ruleParams: unknown;
   capitalCents: Cents;
   selectedSymbol: string | null;
   entryTotalCents: Cents | null;
@@ -181,6 +186,7 @@ export async function getBotRunsForAccount(accountId: string): Promise<BotRunFor
       id: botRuns.id,
       status: botRuns.status,
       ruleId: botRuns.ruleId,
+      ruleParams: botRuns.ruleParams,
       capitalCents: botRuns.capitalCents,
       selectedSymbol: botRuns.selectedSymbol,
       entryTotalCents: botRuns.entryTotalCents,
