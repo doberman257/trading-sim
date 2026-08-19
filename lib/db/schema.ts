@@ -64,6 +64,19 @@ export const botRunStatusEnum = pgEnum("bot_run_status", [
   // outcome (not an error), same discriminated-outcome discipline as
   // RejectReason elsewhere in this app.
   "failed_no_affordable_candidate",
+  // User-initiated cancellation of a "selecting" run - no position was ever
+  // entered, so this is NOT one of the closed_* reasons above (those all
+  // imply a real exit happened). Named "cancelled" to match how
+  // orders.status already uses that exact term for the same concept (a
+  // user backing out of something before it took effect).
+  "cancelled",
+  // User-initiated cancellation of a "holding" run - a real position DID
+  // exist and this DOES trigger a real market sell to close it, so unlike
+  // "cancelled" above, this belongs in the closed_* family alongside
+  // closed_stop_loss/closed_target/closed_rule_exit/closed_day_expiry - the
+  // same kind of event (a real exit), just user-initiated instead of the
+  // rule/worker's own decision.
+  "closed_cancelled",
 ]);
 // Shared by profitTarget/stopLoss below - both are "user picks dollar or
 // percent, per session" per the design brief, and the two configs have
