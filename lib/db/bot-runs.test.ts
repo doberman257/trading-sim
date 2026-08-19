@@ -3,7 +3,12 @@ import { and, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bar } from "../market/alpaca";
-import { fetchDailyBarsForSymbols, fetchQuotes } from "../market/alpaca";
+import {
+  fetchDailyBarsForSymbols,
+  fetchQuote,
+  fetchQuotes,
+  NoTwoSidedQuoteError,
+} from "../market/alpaca";
 import { isApproachingMarketClose } from "../trading/bot-day-expiry";
 import { rollingHigh, rsi, sma } from "../trading/indicators";
 import {
@@ -16,6 +21,7 @@ import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
 import { getOrCreateAccount } from "./accounts";
 import {
+  cancelBotRun,
   createBotRun,
   getActiveBotRunCount,
   getBotRunsForAccount,
@@ -35,7 +41,18 @@ import { assertLedgerBalances } from "./test-helpers";
 // bot's ORCHESTRATION - order tagging, lock-based claiming, the
 // cancel-vs-fill race - not re-proving RSI/SMA's own math, which already
 // has its own dedicated, published-example-cross-checked test suite.
-vi.mock("../market/alpaca", () => ({ fetchQuotes: vi.fn(), fetchDailyBarsForSymbols: vi.fn() }));
+vi.mock("../market/alpaca", () => ({
+  fetchQuotes: vi.fn(),
+  fetchQuote: vi.fn(),
+  fetchDailyBarsForSymbols: vi.fn(),
+  // A real (if minimal) class, not just vi.fn() - cancelBotRun's own
+  // `error instanceof NoTwoSidedQuoteError` check needs a real class to
+  // check against, the same reason every other wholesale module mock in
+  // this file has to account for every export the code under test actually
+  // touches, not just the ones a given test happens to call directly (see
+  // the DEFAULT_RSI_PERIOD gotcha already documented in STATE.md).
+  NoTwoSidedQuoteError: class NoTwoSidedQuoteError extends Error {},
+}));
 vi.mock("../trading/market-hours", () => ({ isMarketOpen: vi.fn() }));
 vi.mock("../trading/bot-day-expiry", () => ({ isApproachingMarketClose: vi.fn() }));
 vi.mock("../trading/indicators", () => ({
@@ -214,6 +231,7 @@ function mockNoEligibleCandidates(): void {
 
 beforeEach(async () => {
   vi.mocked(fetchQuotes).mockReset();
+  vi.mocked(fetchQuote).mockReset();
   vi.mocked(fetchDailyBarsForSymbols).mockReset();
   vi.mocked(isMarketOpen).mockReset();
   vi.mocked(isMarketOpen).mockReturnValue(true);
@@ -923,6 +941,418 @@ describe("runBotWorker - invocation logging", () => {
     expect(lastRun?.status).toBe("failed");
     expect(lastRun?.errorMessage).toBe("Alpaca is down");
     expect(lastRun?.finishedAt).not.toBeNull();
+  });
+});
+
+describe("cancelBotRun", () => {
+  it("cancels a 'selecting' run with no position, flipping it straight to cancelled", async () => {
+    const userId = randomUUID();
+    const created = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!created.ok) throw new Error("setup failed");
+
+    const result = await cancelBotRun(userId, created.runId, new Date());
+    expect(result).toEqual({ ok: true, status: "cancelled" });
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
+    expect(run?.status).toBe("cancelled");
+    expect(run?.closedAt).not.toBeNull();
+  });
+
+  it("cancels a 'holding' run by closing its real position via a market sell - same execution path a stop-loss exit uses", async () => {
+    const userId = randomUUID();
+    const { runId, accountId, targetOrderId } = await createHoldingRun(
+      userId,
+      toCents("50.00"),
+      toCents("30.00"),
+    );
+
+    // A fresh, never-cached quote - fetched by cancelBotRun itself, not
+    // reused from anything the entry used.
+    vi.mocked(fetchQuote).mockResolvedValue({
+      symbol: "AAPL",
+      bidCents: toCents("102.00"),
+      askCents: toCents("103.00"),
+      timestamp: new Date(),
+    });
+
+    const result = await cancelBotRun(userId, runId, new Date());
+    if (!result.ok || result.status !== "closed_cancelled") {
+      throw new Error(`expected a closed_cancelled success, got ${JSON.stringify(result)}`);
+    }
+    // 10 shares entered at $100.00 (see mockEligibleCandidate), sold at the
+    // $102.00 bid: $1020.00 - $1000.00 = $20.00 realized gain.
+    expect(result.realizedPnlCents).toBe(toCents("20.00"));
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+    expect(run?.status).toBe("closed_cancelled");
+    expect(run?.realizedPnlCents).toBe(toCents("20.00"));
+    expect(run?.closedAt).not.toBeNull();
+
+    // The resting profit-target limit order was cancelled first, same as
+    // any other holding-run close - not left dangling.
+    const [cancelledTarget] = await db.select().from(orders).where(eq(orders.id, targetOrderId));
+    expect(cancelledTarget?.status).toBe("cancelled");
+
+    const exitOrders = await db
+      .select()
+      .from(orders)
+      .where(and(eq(orders.botRunId, runId), eq(orders.side, "sell"), eq(orders.type, "market")));
+    expect(exitOrders).toHaveLength(1);
+    expect(exitOrders[0]?.status).toBe("filled");
+
+    await assertLedgerBalances(accountId);
+  });
+
+  it("returns no_quote and leaves the position untouched when no live quote is available for the held symbol", async () => {
+    const userId = randomUUID();
+    const { runId } = await createHoldingRun(userId, toCents("50.00"), toCents("30.00"));
+    vi.mocked(fetchQuote).mockRejectedValue(new NoTwoSidedQuoteError("no active quote"));
+
+    const result = await cancelBotRun(userId, runId, new Date());
+    expect(result).toEqual({ ok: false, reason: "no_quote" });
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+    expect(run?.status).toBe("holding"); // untouched - nothing sold, nothing cancelled
+  });
+
+  it("returns not_found for a run id that does not exist", async () => {
+    const userId = randomUUID();
+    await getOrCreateAccount(userId);
+    const result = await cancelBotRun(userId, randomUUID(), new Date());
+    expect(result).toEqual({ ok: false, reason: "not_found" });
+  });
+
+  // Deliberately the same reason as "doesn't exist at all" - confirming a
+  // run id exists for an account that isn't yours is its own small
+  // information leak, same reasoning as cancelOrderByAccountId's own
+  // "not_found".
+  it("returns not_found (not a permission error) for a run that belongs to a different account", async () => {
+    const ownerUserId = randomUUID();
+    const created = await createBotRun({
+      userId: ownerUserId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!created.ok) throw new Error("setup failed");
+
+    const result = await cancelBotRun(randomUUID(), created.runId, new Date());
+    expect(result).toEqual({ ok: false, reason: "not_found" });
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
+    expect(run?.status).toBe("selecting"); // untouched by the other account's attempt
+  });
+
+  it("returns already_resolved (not a repeat success) when cancelling an already-cancelled run", async () => {
+    const userId = randomUUID();
+    const created = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!created.ok) throw new Error("setup failed");
+
+    const first = await cancelBotRun(userId, created.runId, new Date());
+    expect(first).toEqual({ ok: true, status: "cancelled" });
+
+    const second = await cancelBotRun(userId, created.runId, new Date());
+    expect(second).toEqual({
+      ok: false,
+      reason: "already_resolved",
+      actualStatus: "cancelled",
+    });
+  });
+
+  it("returns already_resolved for a run that resolved to a terminal, non-closed state (failed_no_affordable_candidate)", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+    const [inserted] = await db
+      .insert(botRuns)
+      .values({
+        accountId: account.id,
+        status: "failed_no_affordable_candidate",
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        ruleParams: {
+          kind: "rsi_pullback",
+          rsiPeriod: 14,
+          rsiEntryThreshold: 40,
+          rsiExitThreshold: 50,
+          smaPeriod: 50,
+        },
+        capitalCents: toCents("10.00"),
+        profitTargetType: "dollar",
+        profitTargetValueCents: toCents("1.00"),
+        stopLossType: "dollar",
+        stopLossValueCents: toCents("1.00"),
+        closedAt: new Date(),
+      })
+      .returning({ id: botRuns.id });
+    if (!inserted) throw new Error("setup failed");
+
+    const result = await cancelBotRun(userId, inserted.id, new Date());
+    expect(result).toEqual({
+      ok: false,
+      reason: "already_resolved",
+      actualStatus: "failed_no_affordable_candidate",
+    });
+  });
+
+  it("returns already_closed (not a repeat success) when cancelling a run already closed via an earlier cancellation", async () => {
+    const userId = randomUUID();
+    const { runId } = await createHoldingRun(userId, toCents("50.00"), toCents("30.00"));
+    vi.mocked(fetchQuote).mockResolvedValue({
+      symbol: "AAPL",
+      bidCents: toCents("102.00"),
+      askCents: toCents("103.00"),
+      timestamp: new Date(),
+    });
+
+    const first = await cancelBotRun(userId, runId, new Date());
+    expect(first.ok).toBe(true);
+
+    const second = await cancelBotRun(userId, runId, new Date());
+    expect(second).toEqual({
+      ok: false,
+      reason: "already_closed",
+      actualStatus: "closed_cancelled",
+      realizedPnlCents: toCents("20.00"),
+    });
+  });
+});
+
+// The two real races the design brief calls out explicitly: the selection
+// worker could be mid-cycle and about to enter this exact run at the same
+// moment a user cancels it, and the monitoring cycle could be closing an
+// already-holding run for its own reason (stop-loss/target/rule-exit) at
+// the same moment a user cancels it. Both proven the same way every other
+// row-lock race in this file is proven: hold the bot_run row's lock via a
+// raw connection, mutate it to simulate the OTHER side's win while still
+// holding, and confirm the real call under test genuinely blocks on that
+// lock and then correctly reads back the post-hold state, rather than
+// racing past it or acting on a stale read. Each direction is its own test
+// because cancelSelectingBotRun and tryEnterBotRun are two independently-
+// written SELECT ... FOR UPDATE statements - a lock bug in either one is a
+// real, separate risk, not a single shared code path (unlike the
+// holding-run race below, where cancellation and the monitoring cycle's
+// own exit already funnel through the exact same tryExitBotRunViaMarketSell
+// lock, so proving it from cancellation's own side is sufficient).
+describe("cancelBotRun - races with the worker", () => {
+  it("cancelling a 'selecting' run genuinely blocks on the row lock, held by a concurrent entry, and correctly reports already_entered afterward", async () => {
+    const userId = randomUUID();
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error("Missing TEST_DATABASE_URL");
+    }
+
+    const created = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!created.ok) throw new Error("setup failed");
+
+    const rawSql = postgres(testDatabaseUrl, { prepare: false });
+    try {
+      const start = Date.now();
+      let cancelStartedAfterMs: number | null = null;
+
+      const rawHold = rawSql.begin(async (tx) => {
+        await tx`select * from bot_runs where id = ${created.runId} for update`;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        // Simulates the worker's own selection cycle having entered this
+        // run right under the cancellation's nose - whatever this commits
+        // is what cancelBotRun's own re-check must see, not whatever was
+        // true when it started.
+        await tx`update bot_runs set status = 'holding', selected_symbol = 'AAPL',
+                  entry_total_cents = ${toCents("1000.00").toString()}, entry_quantity = 10
+                  where id = ${created.runId}`;
+      });
+
+      // Give the raw hold a head start so it acquires the lock first.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const cancelCall = (async () => {
+        cancelStartedAfterMs = Date.now() - start;
+        return cancelBotRun(userId, created.runId, new Date());
+      })();
+
+      const [, result] = await Promise.all([rawHold, cancelCall]);
+
+      if (cancelStartedAfterMs === null) throw new Error("cancellation never started");
+      // Started well before the 300ms hold released (proving it was
+      // actually attempted while the lock was held, not conveniently
+      // scheduled to run after) - the real proof is in the outcome below,
+      // not this timing alone.
+      expect(cancelStartedAfterMs).toBeLessThan(300);
+
+      // Correctly reports the honest outcome - it could only know the
+      // worker won by waiting for the lock and re-reading, not by acting
+      // on the "selecting" status that was true when this call started.
+      expect(result).toEqual({ ok: false, reason: "already_entered" });
+
+      const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
+      // Untouched by the cancellation attempt - still "holding," not
+      // wrongly overwritten to "cancelled" out from under a real position.
+      expect(run?.status).toBe("holding");
+    } finally {
+      await rawSql.end();
+    }
+  });
+
+  it("the worker's own entry attempt genuinely blocks on the row lock, held by a concurrent cancellation, and correctly does not enter an already-cancelled run", async () => {
+    const userId = randomUUID();
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error("Missing TEST_DATABASE_URL");
+    }
+
+    const created = await createBotRun({
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+    });
+    if (!created.ok) throw new Error("setup failed");
+
+    mockEligibleCandidate(); // AAPL genuinely qualifies - the worker WOULD enter this run if it could
+
+    const rawSql = postgres(testDatabaseUrl, { prepare: false });
+    try {
+      const start = Date.now();
+      let workerStartedAfterMs: number | null = null;
+
+      const rawHold = rawSql.begin(async (tx) => {
+        await tx`select * from bot_runs where id = ${created.runId} for update`;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        // Simulates a user's cancellation having won the race - whatever
+        // this commits is what tryEnterBotRun's own re-check must see.
+        await tx`update bot_runs set status = 'cancelled', closed_at = now()
+                  where id = ${created.runId}`;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workerRun = (async () => {
+        workerStartedAfterMs = Date.now() - start;
+        return runBotWorker(new Date());
+      })();
+
+      const [, outcome] = await Promise.all([rawHold, workerRun]);
+      if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+
+      if (workerStartedAfterMs === null) throw new Error("worker never started");
+      expect(workerStartedAfterMs).toBeLessThan(300);
+
+      // Never entered - it could only know the run was cancelled by
+      // waiting for the lock and re-reading, not by acting on "selecting."
+      expect(outcome.counts.runsEntered).toBe(0);
+
+      const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
+      // Still "cancelled" - not wrongly overwritten to "holding" with a
+      // real, orphaned position under a run the user already cancelled.
+      expect(run?.status).toBe("cancelled");
+
+      const runOrders = await db.select().from(orders).where(eq(orders.botRunId, created.runId));
+      expect(runOrders).toHaveLength(0);
+    } finally {
+      await rawSql.end();
+    }
+  });
+});
+
+describe("cancelBotRun - races with the monitoring cycle", () => {
+  it("cancelling a 'holding' run genuinely blocks on the row lock, held by a concurrent stop-loss close, and correctly reports the real close reason afterward", async () => {
+    const userId = randomUUID();
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error("Missing TEST_DATABASE_URL");
+    }
+
+    const { runId, accountId, targetOrderId } = await createHoldingRun(
+      userId,
+      toCents("50.00"),
+      toCents("30.00"),
+    );
+
+    vi.mocked(fetchQuote).mockResolvedValue({
+      symbol: "AAPL",
+      bidCents: toCents("102.00"),
+      askCents: toCents("103.00"),
+      timestamp: new Date(),
+    });
+
+    const rawSql = postgres(testDatabaseUrl, { prepare: false });
+    try {
+      const start = Date.now();
+      let cancelStartedAfterMs: number | null = null;
+
+      const rawHold = rawSql.begin(async (tx) => {
+        await tx`select * from bot_runs where id = ${runId} for update`;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        // Simulates the monitoring cycle's own stop-loss close having won
+        // the race - a real close, with its own real realizedPnlCents, and
+        // (same as any real stop-loss close) the resting target order
+        // cancelled too, so the simulated end state stays internally
+        // consistent.
+        await tx`update orders set status = 'cancelled' where id = ${targetOrderId}`;
+        await tx`update bot_runs set status = 'closed_stop_loss',
+                  realized_pnl_cents = ${(-toCents("40.00")).toString()}, closed_at = now()
+                  where id = ${runId}`;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const cancelCall = (async () => {
+        cancelStartedAfterMs = Date.now() - start;
+        return cancelBotRun(userId, runId, new Date());
+      })();
+
+      const [, result] = await Promise.all([rawHold, cancelCall]);
+
+      if (cancelStartedAfterMs === null) throw new Error("cancellation never started");
+      expect(cancelStartedAfterMs).toBeLessThan(300);
+
+      // Correctly reports the ACTUAL reason this run closed - could only
+      // know this by waiting for the lock and reading back the real
+      // committed state, not by proceeding with its own "closed_cancelled"
+      // write as though it had won the race.
+      expect(result).toEqual({
+        ok: false,
+        reason: "already_closed",
+        actualStatus: "closed_stop_loss",
+        realizedPnlCents: -toCents("40.00"),
+      });
+
+      const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+      // Still closed_stop_loss - not overwritten to closed_cancelled, which
+      // would mean a second sell was attempted against a position that no
+      // longer exists (a real double-sell risk, not just a display bug).
+      expect(run?.status).toBe("closed_stop_loss");
+      expect(run?.realizedPnlCents).toBe(-toCents("40.00"));
+
+      // No second exit order was placed by the losing cancellation attempt.
+      const exitOrders = await db
+        .select()
+        .from(orders)
+        .where(and(eq(orders.botRunId, runId), eq(orders.side, "sell"), eq(orders.type, "market")));
+      expect(exitOrders).toHaveLength(0);
+
+      await assertLedgerBalances(accountId);
+    } finally {
+      await rawSql.end();
+    }
   });
 });
 

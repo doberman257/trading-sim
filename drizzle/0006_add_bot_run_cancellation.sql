@@ -1,0 +1,27 @@
+-- Written by hand for the real Supabase database, same reason as
+-- 0001/0003/0004/0005: `drizzle-kit push` reproducibly crashes
+-- introspecting that database (drizzle-team/drizzle-orm#4496). NOT YET
+-- APPLIED to the real database as of this commit - per this project's
+-- "don't touch prod schema without asking" policy, this migration is ready
+-- but withheld pending the user's explicit go-ahead. Applied locally via
+-- `npm run db:push:test` (drizzle-kit push works fine against local test
+-- Postgres) and confirmed via the integration suite, including a real
+-- break-it-and-check pass on both cancellation races.
+--
+-- Two new bot_run_status values for user-initiated cancellation:
+-- "cancelled" (a "selecting" run cancelled before any position was ever
+-- entered - no exit happened, so this is deliberately NOT one of the
+-- closed_* values below, matching how orders.status already uses
+-- "cancelled" for the same concept) and "closed_cancelled" (a "holding"
+-- run cancelled by actually closing its real position via a market sell -
+-- a genuine exit, so this DOES belong in the closed_* family alongside
+-- closed_stop_loss/closed_target/closed_rule_exit/closed_day_expiry, just
+-- user-initiated instead of the rule/worker's own decision).
+--
+-- Each ALTER TYPE ... ADD VALUE runs in its own statement, not combined
+-- with anything that uses the new value - Postgres forbids using an enum
+-- value added earlier in the same transaction, and this migration never
+-- inserts a row using either new value itself (only cancelBotRun does,
+-- later, in its own transaction).
+ALTER TYPE "public"."bot_run_status" ADD VALUE 'cancelled';
+ALTER TYPE "public"."bot_run_status" ADD VALUE 'closed_cancelled';

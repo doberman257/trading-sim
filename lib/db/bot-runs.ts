@@ -1,5 +1,11 @@
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
-import { fetchDailyBarsForSymbols, fetchQuotes, type Bar } from "../market/alpaca";
+import {
+  fetchDailyBarsForSymbols,
+  fetchQuote,
+  fetchQuotes,
+  NoTwoSidedQuoteError,
+  type Bar,
+} from "../market/alpaca";
 import { BOT_WATCHLIST_SYMBOLS } from "../market/bot-watchlist";
 import { isApproachingMarketClose } from "../trading/bot-day-expiry";
 import { computeBotRunRealizedPnl } from "../trading/bot-pnl";
@@ -27,7 +33,7 @@ import { canPlaceLimitOrder } from "../trading/limit-reservation";
 import type { Cents } from "../trading/money";
 import { rollingHigh, rsi, sma } from "../trading/indicators";
 import { valuePosition } from "../trading/pnl";
-import type { AccountState, Quote } from "../trading/types";
+import type { AccountState, Quote, RejectReason } from "../trading/types";
 import { getOrCreateAccount, loadAccountState } from "./accounts";
 import { db, type DbTransaction } from "./client";
 import {
@@ -750,8 +756,7 @@ async function monitorOneBotRun(
   // see placeRestingProfitTarget's own note); day-order expiry next; the
   // rule's own reversal signal last, since it's the weakest, most passive
   // of the four.
-  let exitReason:
-    "closed_stop_loss" | "closed_target" | "closed_day_expiry" | "closed_rule_exit" | null = null;
+  let exitReason: BotRunAutoExitReason | null = null;
 
   if (isStopLossHit(unrealizedPnlCents, stopLoss, entryTotalCents)) {
     exitReason = "closed_stop_loss";
@@ -773,8 +778,52 @@ async function monitorOneBotRun(
     return false;
   }
 
-  return closeHoldingBotRunViaMarketSell(run, targetOrder ?? null, exitReason, quote, now);
+  const outcome = await closeHoldingBotRunViaMarketSell(
+    run,
+    targetOrder ?? null,
+    exitReason,
+    quote,
+    now,
+  );
+  return outcome.outcome === "closed";
 }
+
+// The monitoring cycle's own four automatic exit reasons - stop-loss/
+// target/day-expiry are cross-cutting (apply regardless of which rule is
+// active), rule_exit is the rule's own reversal signal. Kept as its own
+// named type, distinct from BotRunExitReason below, since monitorOneBotRun
+// only ever DECIDES one of these four - "closed_cancelled" is never a
+// decision the monitoring cycle itself makes, only a user action.
+type BotRunAutoExitReason =
+  "closed_stop_loss" | "closed_target" | "closed_day_expiry" | "closed_rule_exit";
+
+// Every terminal status a "holding" run can be closed into via a real
+// market sell - the four automatic reasons above, plus a user-initiated
+// cancellation. One shared type because closeHoldingBotRunViaMarketSell/
+// tryExitBotRunViaMarketSell below are the exact same operation regardless
+// of WHY the caller wants this run closed - only the final status column
+// value differs.
+type BotRunExitReason = BotRunAutoExitReason | "closed_cancelled";
+
+// What actually happened when a holding run's own close-via-market-sell was
+// attempted - richer than a plain boolean specifically because
+// cancelBotRun (below) needs to report an honest, specific outcome to the
+// user, not just "did or didn't close this cycle" the way monitorOneBotRun
+// itself only needs.
+type ExitBotRunOutcome =
+  | { outcome: "closed"; realizedPnlCents: Cents }
+  // The run resolved to some other terminal state before this attempt's own
+  // lock could win the race - "already resolved" covers both a genuine
+  // race (the monitoring cycle or the resting limit order's own fill beat
+  // this attempt to it) and a plain repeat call (e.g. a user double-
+  // clicking Cancel). finalStatus is whatever actually got written, read
+  // back rather than guessed, so the caller can report the real reason.
+  | {
+      outcome: "already_resolved";
+      finalStatus: BotRunRow["status"];
+      realizedPnlCents: Cents | null;
+    }
+  | { outcome: "rejected"; reason: RejectReason };
 
 // Bookkeeping-only close: the resting profit-target limit order already
 // filled (the limit-order worker's own cycle did it, this cycle or an
@@ -809,10 +858,10 @@ async function closeAlreadyFilledBotRun(
 async function closeHoldingBotRunViaMarketSell(
   run: BotRunRow,
   targetOrder: { id: string } | null,
-  exitReason: "closed_stop_loss" | "closed_target" | "closed_day_expiry" | "closed_rule_exit",
+  exitReason: BotRunExitReason,
   quote: Quote,
   now: Date,
-): Promise<boolean> {
+): Promise<ExitBotRunOutcome> {
   if (run.entryTotalCents === null || run.entryQuantity === null) {
     throw new Error(`Bot run ${run.id} is "holding" but missing its entry fields`);
   }
@@ -830,37 +879,51 @@ async function closeHoldingBotRunViaMarketSell(
         throw new Error(`Target order ${targetOrder.id} reported already_filled with no fill data`);
       }
 
-      return closeAlreadyFilledBotRun(
-        run.id,
-        run.entryTotalCents,
-        filled.filledPriceCents * BigInt(filled.quantity),
-        now,
-      );
+      const exitTotalCents = filled.filledPriceCents * BigInt(filled.quantity);
+      // closeAlreadyFilledBotRun's own WHERE (status = 'holding') makes its
+      // write a harmless no-op if a second concurrent caller reaches this
+      // exact branch for the same run at once (e.g. a cancellation racing
+      // the monitoring cycle, both discovering the same already-filled
+      // target order) - either way, the figures below are computed purely
+      // from the filled order's own row, so they're correct regardless of
+      // which caller's write actually won.
+      await closeAlreadyFilledBotRun(run.id, run.entryTotalCents, exitTotalCents, now);
+      return {
+        outcome: "already_resolved",
+        finalStatus: "closed_target",
+        realizedPnlCents: computeBotRunRealizedPnl(run.entryTotalCents, exitTotalCents),
+      };
     }
     // ok: true (cancelled), or not_cancellable/not_found (already resolved
     // some other way) - either way, proceed to the market sell below.
   }
 
-  const outcome = await tryExitBotRunViaMarketSell(run.id, quote, exitReason, now);
-  return outcome === "closed";
+  return tryExitBotRunViaMarketSell(run.id, quote, exitReason, now);
 }
 
 async function tryExitBotRunViaMarketSell(
   runId: string,
   quote: Quote,
-  exitReason: "closed_stop_loss" | "closed_target" | "closed_day_expiry" | "closed_rule_exit",
+  exitReason: BotRunExitReason,
   now: Date,
-): Promise<"closed" | "already_resolved" | "rejected"> {
+): Promise<ExitBotRunOutcome> {
   return db.transaction(async (tx) => {
     const [lockedRun] = await tx.select().from(botRuns).where(eq(botRuns.id, runId)).for("update");
 
+    if (!lockedRun) {
+      throw new Error(`Bot run ${runId} disappeared mid-transaction - this should be impossible`);
+    }
+
     if (
-      !lockedRun ||
       lockedRun.status !== "holding" ||
       lockedRun.entryQuantity === null ||
       lockedRun.entryTotalCents === null
     ) {
-      return "already_resolved";
+      return {
+        outcome: "already_resolved",
+        finalStatus: lockedRun.status,
+        realizedPnlCents: lockedRun.realizedPnlCents,
+      };
     }
 
     const [lockedAccount] = await tx
@@ -887,7 +950,7 @@ async function tryExitBotRunViaMarketSell(
         rejectReason: result.reason,
         botRunId: runId,
       });
-      return "rejected";
+      return { outcome: "rejected", reason: result.reason };
     }
 
     const { fill } = result;
@@ -920,6 +983,199 @@ async function tryExitBotRunViaMarketSell(
       .set({ status: exitReason, realizedPnlCents, closedAt: now })
       .where(eq(botRuns.id, runId));
 
-    return "closed";
+    return { outcome: "closed", realizedPnlCents };
   });
+}
+
+export type CancelBotRunReason =
+  // No run with this id exists for this account - either it was never
+  // this account's run, or the id is simply wrong. Deliberately the same
+  // reason for "doesn't exist" and "belongs to someone else" - same
+  // information-leak reasoning as cancelOrderByAccountId's own "not_found".
+  | "not_found"
+  // Was "selecting" when this cancellation started, but the worker's own
+  // selection cycle won the race and entered it first - a real, expected
+  // outcome under concurrent access, not an error. There is now an open
+  // position under this run; cancelling it requires a fresh attempt, which
+  // will take the "holding" path instead.
+  | "already_entered"
+  // Was "holding," but resolved to a real closed_* status (by the
+  // monitoring cycle, the resting limit order's own fill, or an earlier
+  // cancellation call) before this attempt's own lock could win the race.
+  | "already_closed"
+  // Any other already-terminal state this run was in before this
+  // cancellation attempt even started (already "cancelled," or resolved as
+  // "failed_no_affordable_candidate") - nothing left to cancel, and no
+  // exit ever happened, so this isn't "already_closed" either.
+  | "already_resolved"
+  // The "holding" path's own market sell was rejected outright - reuses
+  // RejectReason rather than inventing a parallel set of reasons, same as
+  // every other execution path in this app.
+  | RejectReason;
+
+export type CancelBotRunResult =
+  | { ok: true; status: "cancelled" }
+  | { ok: true; status: "closed_cancelled"; realizedPnlCents: Cents }
+  | { ok: false; reason: "not_found" }
+  | { ok: false; reason: "already_entered" }
+  | {
+      ok: false;
+      reason: "already_closed";
+      actualStatus: BotRunRow["status"];
+      realizedPnlCents: Cents | null;
+    }
+  | { ok: false; reason: "already_resolved"; actualStatus: BotRunRow["status"] }
+  | { ok: false; reason: RejectReason };
+
+// Reports an honest outcome for a run already found in some terminal state
+// that isn't itself the direct result of THIS cancellation attempt -
+// shared by both the "selecting" and "holding" paths below, since both can
+// discover this same shape of situation (a race already lost, or a plain
+// repeat call). Exhaustive over every status this function's caller can
+// legitimately hand it - "selecting"/"holding" are deliberately NOT covered
+// here (a live run is never "already resolved"; it goes through its own
+// dedicated cancellation path instead), so passing either throws rather
+// than silently mis-reporting.
+function resolvedOutcomeForStatus(
+  status: BotRunRow["status"],
+  realizedPnlCents: Cents | null,
+): CancelBotRunResult {
+  switch (status) {
+    case "closed_stop_loss":
+    case "closed_target":
+    case "closed_day_expiry":
+    case "closed_rule_exit":
+    case "closed_cancelled":
+      return { ok: false, reason: "already_closed", actualStatus: status, realizedPnlCents };
+    case "cancelled":
+    case "failed_no_affordable_candidate":
+      return { ok: false, reason: "already_resolved", actualStatus: status };
+    case "selecting":
+    case "holding":
+      throw new Error(
+        `resolvedOutcomeForStatus called with a live status ("${status}") - this should be impossible`,
+      );
+  }
+}
+
+// Claims one "selecting" run (same lock-then-re-check primitive as
+// tryEnterBotRun) and flips it straight to "cancelled" if it's still
+// selecting - no position exists yet, so there's no order to place and no
+// money to move. If the selection worker won the race and already entered
+// this run, that's reported as "already_entered," not silently swallowed
+// and not an error either - the exact same discriminated-outcome
+// discipline as cancelOrderByAccountId's own "already_filled".
+async function cancelSelectingBotRun(runId: string, now: Date): Promise<CancelBotRunResult> {
+  return db.transaction(async (tx) => {
+    const [lockedRun] = await tx.select().from(botRuns).where(eq(botRuns.id, runId)).for("update");
+
+    if (!lockedRun) {
+      throw new Error(`Bot run ${runId} disappeared mid-cancellation - this should be impossible`);
+    }
+
+    if (lockedRun.status !== "selecting") {
+      if (lockedRun.status === "holding") {
+        return { ok: false, reason: "already_entered" };
+      }
+      return resolvedOutcomeForStatus(lockedRun.status, lockedRun.realizedPnlCents);
+    }
+
+    await tx
+      .update(botRuns)
+      .set({ status: "cancelled", closedAt: now })
+      .where(eq(botRuns.id, runId));
+
+    return { ok: true, status: "cancelled" };
+  });
+}
+
+// Closes a "holding" run's real position via the exact same machinery the
+// monitoring cycle's own stop-loss/target/day-expiry/rule-exit paths use
+// (closeHoldingBotRunViaMarketSell -> tryExitBotRunViaMarketSell) - no new
+// order logic, no new money math, just a new BotRunExitReason
+// ("closed_cancelled"). A fresh quote is fetched here, outside any
+// transaction (never hold a DB transaction open across a network call,
+// same discipline placeMarketOrder already follows) and never cached, per
+// CLAUDE.md's live-quote rule.
+async function cancelHoldingBotRun(
+  run: BotRunRow,
+  selectedSymbol: string,
+  now: Date,
+): Promise<CancelBotRunResult> {
+  let quote: Quote;
+  try {
+    quote = await fetchQuote(selectedSymbol);
+  } catch (error) {
+    if (!(error instanceof NoTwoSidedQuoteError)) {
+      throw error;
+    }
+    // No active two-sided market for this symbol right now (most often the
+    // market being closed) - a real, expected condition, not an error. The
+    // position is untouched; a later attempt can retry once a quote exists.
+    return { ok: false, reason: "no_quote" };
+  }
+
+  // Same query monitorOneBotRun already uses to find the resting
+  // profit-target sell, if one exists - at most one per run, ever (see
+  // placeRestingProfitTarget).
+  const [targetOrder] = await db
+    .select({ id: orders.id })
+    .from(orders)
+    .where(and(eq(orders.botRunId, run.id), eq(orders.side, "sell"), eq(orders.type, "limit")))
+    .limit(1);
+
+  const outcome = await closeHoldingBotRunViaMarketSell(
+    run,
+    targetOrder ?? null,
+    "closed_cancelled",
+    quote,
+    now,
+  );
+
+  switch (outcome.outcome) {
+    case "closed":
+      return { ok: true, status: "closed_cancelled", realizedPnlCents: outcome.realizedPnlCents };
+    case "already_resolved":
+      return resolvedOutcomeForStatus(outcome.finalStatus, outcome.realizedPnlCents);
+    case "rejected":
+      return { ok: false, reason: outcome.reason };
+  }
+}
+
+// The human-facing entry point (Route Handlers resolve a session to a
+// userId, never an accountId directly) - same shape as createBotRun's own
+// userId-in convention in this same file. Routes to whichever of the two
+// cancellation paths above actually applies, based on a first, unlocked
+// read (this run either belongs to this account or it doesn't, and that
+// fact can't change) - the authoritative status re-check that decides the
+// real outcome always happens under a row lock inside whichever path is
+// taken, never here.
+export async function cancelBotRun(
+  userId: string,
+  runId: string,
+  now: Date,
+): Promise<CancelBotRunResult> {
+  const account = await getOrCreateAccount(userId);
+
+  const [run] = await db
+    .select()
+    .from(botRuns)
+    .where(and(eq(botRuns.id, runId), eq(botRuns.accountId, account.id)));
+
+  if (!run) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  if (run.status === "selecting") {
+    return cancelSelectingBotRun(runId, now);
+  }
+
+  if (run.status === "holding") {
+    if (run.selectedSymbol === null) {
+      throw new Error(`Bot run ${runId} is "holding" but missing its selected symbol`);
+    }
+    return cancelHoldingBotRun(run, run.selectedSymbol, now);
+  }
+
+  return resolvedOutcomeForStatus(run.status, run.realizedPnlCents);
 }
