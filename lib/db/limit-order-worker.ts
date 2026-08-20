@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { fetchQuotes } from "../market/alpaca";
 import { executeMarketOrder } from "../trading/execute";
 import { shouldFillLimitOrder } from "../trading/limit-fill";
@@ -87,12 +87,34 @@ export async function runLimitOrderWorker(now: Date): Promise<LimitOrderWorkerOu
 // will be expired the next time this worker runs while still closed,
 // which - depending on the scheduler's cadence - may be within minutes,
 // not preserved until the next open. See STATE.md for this tradeoff.
+//
+// EXCEPT a bot-tagged resting order (orders.botRunId is set) - this
+// worker's own day-expiry sweep has no business touching those at all.
+// A bot run's resting profit-target order already has a single, real
+// owner - the bot's own monitoring cycle (lib/db/bot-runs.ts), which has
+// its own day-boundary concept (lib/trading/bot-day-expiry.ts) and
+// explicitly cancels this exact order itself whenever it decides to exit,
+// for any reason. This worker silently sweeping the same order out from
+// under the bot - without the bot's own monitoring cycle ever being
+// consulted - is not redundancy, it's two independent systems racing to
+// own one order's terminal state, and the bot losing that race meant its
+// profit-target exit path went silently, permanently dead while the run
+// kept reporting "holding" (see STATE.md's Gotchas for the real production
+// incident this caused - a genuine unprotected-upside window, though
+// stop-loss stayed intact throughout since it's a live check, not
+// order-dependent). Excluding bot-tagged orders here is safe, not just
+// convenient: fillEligibleOrders below already evaluates every pending
+// limit order for FILLING identically regardless of origin (that part is
+// correct and unchanged) - staleness was never a real risk for a resting
+// bot order left unswept, since a fill still re-validates the quote fresh
+// at fill time either way. An orphaned bot order can only ever sit there
+// safely until the bot's own logic acts on it, never silently misfire.
 async function expireAllPendingOrders(): Promise<LimitOrderWorkerRunCounts> {
   const expired = await db.transaction(async (tx) => {
     return tx
       .update(orders)
       .set({ status: "expired" })
-      .where(and(eq(orders.status, "pending"), eq(orders.type, "limit")))
+      .where(and(eq(orders.status, "pending"), eq(orders.type, "limit"), isNull(orders.botRunId)))
       .returning({ id: orders.id });
   });
 

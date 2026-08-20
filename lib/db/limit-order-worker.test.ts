@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchQuotes } from "../market/alpaca";
+import { RSI_PULLBACK_UPTREND_V2_ID, RSI_PULLBACK_UPTREND_V2_PARAMS } from "../trading/bot-rule";
 import { isMarketOpen } from "../trading/market-hours";
 import { toCents } from "../trading/money";
 import type { Quote } from "../trading/types";
@@ -9,7 +10,7 @@ import { getOrCreateAccount } from "./accounts";
 import { db, poolMax } from "./client";
 import { getLastLimitOrderWorkerRun, runLimitOrderWorker } from "./limit-order-worker";
 import { placeLimitOrder } from "./orders";
-import { accounts, orders, positions } from "./schema";
+import { accounts, botRuns, orders, positions } from "./schema";
 import { assertLedgerBalances } from "./test-helpers";
 
 // Everything else in this file hits the real test database - only the
@@ -315,6 +316,82 @@ describe("runLimitOrderWorker - market closed, expire sweep", () => {
     // fetchQuotes must not even be called on this branch - there's nothing
     // to check a price against when every pending order is being expired.
     expect(fetchQuotes).not.toHaveBeenCalled();
+  });
+
+  // The real production incident this test exists to prevent a regression
+  // of: a bot run's own resting profit-target sell was swept to "expired"
+  // by this exact sweep, with the bot's own monitoring cycle never
+  // consulted - which silently, permanently killed that run's
+  // profit-target exit path (its own fallback logic only re-triggers when
+  // no resting order exists at all, not when one exists but is no longer
+  // pending - see lib/db/bot-runs.ts's monitorOneBotRun). A bot-tagged
+  // resting order has a single real owner (the bot's own monitoring
+  // cycle, via lib/trading/bot-day-expiry.ts's own day-boundary concept)
+  // and this worker must never touch its terminal state - see STATE.md's
+  // Gotchas for the full incident. A plain user-placed order in the SAME
+  // sweep must still expire normally - this isn't "day-expiry stopped
+  // working," it's scoped to exactly the one column that distinguishes
+  // ownership.
+  it("does not expire a bot-tagged resting order, while a plain user-placed order in the same sweep still expires normally", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    const [botRun] = await db
+      .insert(botRuns)
+      .values({
+        accountId: account.id,
+        status: "holding",
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        ruleParams: RSI_PULLBACK_UPTREND_V2_PARAMS,
+        capitalCents: toCents("1000.00"),
+        profitTargetType: "dollar",
+        profitTargetValueCents: toCents("50.00"),
+        stopLossType: "dollar",
+        stopLossValueCents: toCents("30.00"),
+        selectedSymbol: "AAPL",
+        entryTotalCents: toCents("1000.00"),
+        entryQuantity: 10,
+      })
+      .returning({ id: botRuns.id });
+    if (!botRun) throw new Error("setup failed");
+
+    const [botOrder] = await db
+      .insert(orders)
+      .values({
+        accountId: account.id,
+        symbol: "AAPL",
+        side: "sell",
+        type: "limit",
+        quantity: 10,
+        limitPriceCents: toCents("110.00"),
+        status: "pending",
+        botRunId: botRun.id,
+      })
+      .returning({ id: orders.id });
+    if (!botOrder) throw new Error("setup failed");
+
+    const userPlaced = await placeLimitOrder({
+      userId,
+      symbol: "AAPL",
+      side: "buy",
+      quantity: 1,
+      limitPriceCents: toCents("100.00"),
+    });
+    if (!userPlaced.ok) throw new Error("setup failed");
+
+    vi.mocked(isMarketOpen).mockReturnValue(false);
+    const outcome = await runLimitOrderWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker run failed: ${outcome.error}`);
+
+    // Only the plain user-placed order counted as expired - the bot-tagged
+    // one is excluded from the sweep entirely, not just skipped-but-counted.
+    expect(outcome.counts.ordersExpired).toBe(1);
+
+    const [botOrderRow] = await db.select().from(orders).where(eq(orders.id, botOrder.id));
+    expect(botOrderRow?.status).toBe("pending");
+
+    const [userOrderRow] = await db.select().from(orders).where(eq(orders.id, userPlaced.orderId));
+    expect(userOrderRow?.status).toBe("expired");
   });
 
   it("does not touch orders that are already filled, cancelled, or rejected", async () => {
