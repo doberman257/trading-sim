@@ -1,0 +1,33 @@
+-- Written by hand for the real Supabase database, same reason as
+-- 0001/0003/0004/0005/0006: `drizzle-kit push` reproducibly crashes
+-- introspecting that database (drizzle-team/drizzle-orm#4496). NOT YET
+-- APPLIED to the real database as of this commit - per this project's
+-- "don't touch prod schema without asking" policy, this migration is ready
+-- but withheld pending the user's explicit go-ahead. Applied locally via
+-- `npm run db:push:test` (drizzle-kit push works fine against local test
+-- Postgres) and confirmed via the integration suite, including the real
+-- max-hold priority-logic tests and the weekend-gap tests.
+--
+-- One new bot_run_status value - "closed_max_hold" - for a run closed by
+-- its own effective deadline (the rule family's fixed maxHoldDays cap, or
+-- a user's own earlier timeHorizonDeadlineAt, whichever comes first - see
+-- effectiveDeadline in lib/trading/bot-day-expiry.ts). Deliberately
+-- distinct from the existing closed_day_expiry, which stays reserved for
+-- "no cap and no custom deadline - the default same-trading-day close
+-- fired" (rsi_pullback with no custom deadline, unchanged).
+--
+-- Run in its own statement, not combined with anything that uses the new
+-- value - Postgres forbids using an enum value added earlier in the same
+-- transaction.
+ALTER TYPE "public"."bot_run_status" ADD VALUE 'closed_max_hold';
+
+-- The entry fill's own timestamp - what a rule family's own maxHoldDays
+-- cap is measured from (NOT created_at, which is when a run started
+-- "selecting," possibly well before an actual entry fill). Nullable: null
+-- for a run still "selecting," or for any row that entered before this
+-- column existed (a real historical case, not just a hypothetical one -
+-- see STATE.md's Gotchas on timeHorizonDeadlineAt's own pre-existing
+-- no-op history). effectiveDeadline (lib/trading/bot-day-expiry.ts) treats
+-- a null entryFilledAt as "no strategy-cap deadline yet" for any such row,
+-- the same as a run that simply hasn't entered anything yet.
+ALTER TABLE "bot_runs" ADD COLUMN "entry_filled_at" timestamp with time zone;

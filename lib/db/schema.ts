@@ -77,6 +77,18 @@ export const botRunStatusEnum = pgEnum("bot_run_status", [
   // same kind of event (a real exit), just user-initiated instead of the
   // rule/worker's own decision.
   "closed_cancelled",
+  // A run's own effective deadline was reached - either the rule family's
+  // own fixed max-hold cap (maxHoldDays in lib/trading/bot-rule.ts, null
+  // for rsi_pullback, 30 days for golden_cross/breakout - see each params
+  // constant's own comment for the real historical binding rate) or a
+  // user's own earlier timeHorizonDeadlineAt, whichever comes first.
+  // Deliberately distinct from closed_day_expiry, which stays reserved for
+  // "no cap and no custom deadline applied - the default same-trading-day
+  // close fired" specifically (rsi_pullback with no custom deadline,
+  // unchanged from before this status existed) - reusing closed_day_expiry
+  // for an exit that can happen weeks later would make BotRunsPanel's own
+  // "Closed - day expiry" label read wrong.
+  "closed_max_hold",
 ]);
 // Shared by profitTarget/stopLoss below - both are "user picks dollar or
 // percent, per session" per the design brief, and the two configs have
@@ -110,9 +122,11 @@ export const positions = pgTable(
 );
 
 // A bot-initiated investment cycle: pick a symbol, buy it with a fixed
-// capital budget, and exit on whichever of four conditions fires first
-// (rule reversal, profit target, stop-loss, or day-order expiry) - see
-// lib/db/bot-runs.ts. One row per run, not per trade: a run's entry buy and
+// capital budget, and exit on whichever condition fires first - rule
+// reversal, profit target, stop-loss, or a time-based cap (same-trading-day
+// close for rsi_pullback, a 30-day max hold for golden_cross/breakout, or
+// a user's own earlier deadline - see lib/trading/bot-rule.ts's
+// maxHoldDays) - see lib/db/bot-runs.ts. One row per run, not per trade: a run's entry buy and
 // its eventual exit sell are both ordinary rows in `orders` below, tagged
 // with this run's id via orders.botRunId, so nothing about order placement
 // or fill accounting is duplicated here - this table exists to carry what
@@ -144,9 +158,17 @@ export const botRuns = pgTable("bot_runs", {
   stopLossType: botTargetTypeEnum("stop_loss_type").notNull(),
   stopLossValueCents: bigint("stop_loss_value_cents", { mode: "bigint" }),
   stopLossBasisPoints: integer("stop_loss_basis_points"),
-  // Null means "no earlier deadline than the rule's own day-order expiry" -
-  // see the design proposal on why day-order expiry is now baked into the
-  // rule's own exit conditions rather than depending on this field being set.
+  // An optional, user-chosen EARLIER deadline than whatever the rule's own
+  // effective cap already is (same-day for rsi_pullback, 30 days from
+  // entry for golden_cross/breakout - see maxHoldDays in
+  // lib/trading/bot-rule.ts). createBotRun rejects any value later than
+  // that cap outright (invalid_deadline), so once stored, this can only
+  // ever pull an exit EARLIER than the rule's own cap, never override it -
+  // monitorOneBotRun takes whichever of the two is sooner. Actually wired
+  // into the exit-priority check as of the maxHoldDays round - before that,
+  // this field was accepted, validated, and stored, but never once read by
+  // anything, a real no-op for every value regardless of the day-expiry
+  // question (see STATE.md's Gotchas).
   timeHorizonDeadlineAt: timestamp("time_horizon_deadline_at", { withTimezone: true }),
   // Set once selection succeeds - null while status is still "selecting".
   selectedSymbol: text("selected_symbol"),
@@ -162,6 +184,12 @@ export const botRuns = pgTable("bot_runs", {
   // exit sell) and this avoids a repeated join for something that never
   // changes once set.
   entryQuantity: integer("entry_quantity"),
+  // The entry fill's own timestamp - same "avoid a repeated join back to
+  // the entry order row every monitoring cycle" reasoning as entryQuantity
+  // above. This, not createdAt (when the run started SELECTING, which can
+  // be well before an actual entry fill), is what a rule family's own
+  // maxHoldDays cap is measured from.
+  entryFilledAt: timestamp("entry_filled_at", { withTimezone: true }),
   // Denormalized from the exit order's own fill, the same way
   // transactions.balanceAfterCents already caches a value computed once
   // elsewhere rather than re-deriving it - see lib/trading/bot-pnl.ts. Null

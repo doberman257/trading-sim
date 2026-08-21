@@ -7,12 +7,17 @@ import {
   type Bar,
 } from "../market/alpaca";
 import { BOT_WATCHLIST_SYMBOLS } from "../market/bot-watchlist";
-import { isApproachingMarketClose } from "../trading/bot-day-expiry";
+import {
+  effectiveDeadline,
+  isApproachingMarketClose,
+  nextApplicableCloseTime,
+} from "../trading/bot-day-expiry";
 import { computeBotRunRealizedPnl } from "../trading/bot-pnl";
 import {
   AVAILABLE_STRATEGIES,
   BREAKOUT_52WK_HIGH_V1_PARAMS,
   GOLDEN_CROSS_V1_PARAMS,
+  maxHoldDays,
   parseRuleParams,
   RSI_PULLBACK_UPTREND_V2_PARAMS,
   ruleShouldExit,
@@ -110,8 +115,34 @@ export type CreateBotRunResult =
   | { ok: true; runId: string }
   | {
       ok: false;
-      reason: "invalid_capital" | "invalid_profit_target" | "invalid_stop_loss" | "invalid_rule_id";
+      reason:
+        | "invalid_capital"
+        | "invalid_profit_target"
+        | "invalid_stop_loss"
+        | "invalid_rule_id"
+        | "invalid_deadline";
     };
+
+// The latest a caller may set timeHorizonDeadlineAt for a given rule - the
+// rule family's own maxHoldDays cap (lib/trading/bot-rule.ts) measured from
+// `now` (the real entry date isn't known yet at creation time, since the
+// run hasn't entered anything - this is necessarily a conservative,
+// creation-time proxy for it; monitorOneBotRun separately re-enforces the
+// TRUE entry-based cap at evaluation time regardless of what was validated
+// here, so a run that sits "selecting" for a while before entering can
+// never end up with an effective deadline later than the real cap, only
+// this validation's own advance estimate of it). null maxHoldDays
+// (rsi_pullback) means same-day - the applicable boundary is whichever
+// trading session's close is soonest, via nextApplicableCloseTime, not
+// just "today's calendar date" (a run created after hours has no session
+// left today to be same-day about).
+function latestAllowedDeadline(kind: BotRuleParams["kind"], now: Date): Date {
+  const days = maxHoldDays(kind);
+  if (days === null) {
+    return nextApplicableCloseTime(now);
+  }
+  return new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+}
 
 // Validates and inserts a new "selecting" run - does not select a symbol or
 // place any order itself. The worker's own selection cycle (see
@@ -119,7 +150,10 @@ export type CreateBotRunResult =
 // calls this may also trigger one cycle immediately for faster feedback
 // (see app/api/bot/runs/route.ts), but that is a caller choice, not
 // something this function does on its own.
-export async function createBotRun(input: CreateBotRunInput): Promise<CreateBotRunResult> {
+export async function createBotRun(
+  input: CreateBotRunInput,
+  now: Date,
+): Promise<CreateBotRunResult> {
   const strategy = AVAILABLE_STRATEGIES[input.ruleId];
   if (!strategy) {
     return { ok: false, reason: "invalid_rule_id" };
@@ -132,6 +166,13 @@ export async function createBotRun(input: CreateBotRunInput): Promise<CreateBotR
   }
   if (validateTargetConfig(input.stopLoss, input.capitalCents) !== null) {
     return { ok: false, reason: "invalid_stop_loss" };
+  }
+  if (
+    input.timeHorizonDeadlineAt != null &&
+    input.timeHorizonDeadlineAt.getTime() >
+      latestAllowedDeadline(strategy.params.kind, now).getTime()
+  ) {
+    return { ok: false, reason: "invalid_deadline" };
   }
 
   const account = await getOrCreateAccount(input.userId);
@@ -451,13 +492,16 @@ async function attemptEntryForRun(
       return attempt;
     }
     // "rejected" (a real-time stale_quote/market_closed/insufficient_funds)
-    // - fall through and try the next ranked candidate this same cycle.
+    // or "duplicate_symbol" (a same-ruleId sibling run already holds this
+    // exact symbol) - fall through and try the next ranked candidate this
+    // same cycle, neither counts as an affordability problem.
   }
 
   if (rankedCandidates.length === 0 || anyAffordable) {
     // Either nothing qualifies yet, or something qualified and was
-    // affordable but every attempt hit a transient real-time rejection -
-    // both retry-worthy next cycle, neither a terminal failure.
+    // affordable but every attempt hit a transient real-time rejection or a
+    // same-ruleId duplicate - both retry-worthy next cycle, neither a
+    // terminal failure.
     return "no_candidate_yet";
   }
 
@@ -489,7 +533,7 @@ async function tryEnterBotRun(
   quote: Quote,
   quantity: number,
   now: Date,
-): Promise<"entered" | "rejected" | "already_resolved"> {
+): Promise<"entered" | "rejected" | "already_resolved" | "duplicate_symbol"> {
   return db.transaction(async (tx) => {
     const [lockedRun] = await tx.select().from(botRuns).where(eq(botRuns.id, runId)).for("update");
 
@@ -505,6 +549,34 @@ async function tryEnterBotRun(
 
     if (!lockedAccount) {
       throw new Error(`Account ${lockedRun.accountId} not found`);
+    }
+
+    // Same-ruleId symbol exclusivity: two runs under the same strategy must
+    // never simultaneously hold the same symbol (a different strategy
+    // entering the same symbol at the same time stays valid and unchanged -
+    // see the cross-ruleId merge test). Checked here, inside the SAME
+    // account-row lock just acquired above - that's what makes this
+    // genuinely race-safe: two concurrent entry attempts for two different
+    // runs under the same account always serialize on that one lock (the
+    // documented bot_run-row-then-account-row ordering), so whichever
+    // transaction commits first is exactly what this fresh read in the
+    // second one sees. Scoped to this account only - a different account's
+    // own same-ruleId holding is irrelevant, positions are already
+    // account-scoped.
+    const [alreadyHeldBySameRule] = await tx
+      .select({ id: botRuns.id })
+      .from(botRuns)
+      .where(
+        and(
+          eq(botRuns.accountId, lockedAccount.id),
+          eq(botRuns.ruleId, lockedRun.ruleId),
+          eq(botRuns.status, "holding"),
+          eq(botRuns.selectedSymbol, quote.symbol),
+        ),
+      );
+
+    if (alreadyHeldBySameRule) {
+      return "duplicate_symbol";
     }
 
     const accountState = await loadAccountState(tx, lockedAccount.id);
@@ -574,6 +646,7 @@ async function tryEnterBotRun(
         selectedSymbol: quote.symbol,
         entryTotalCents: fill.totalCents,
         entryQuantity: fill.quantity,
+        entryFilledAt: now,
       })
       .where(eq(botRuns.id, runId));
 
@@ -755,25 +828,43 @@ async function monitorOneBotRun(
     run.profitTargetBasisPoints,
   );
 
-  // Priority among the four exit conditions, stated and deterministic, not
-  // a judgment call - only one sell can actually happen per cycle, so a
-  // tie needs a rule. Stop-loss (risk control) first; the profit-target
+  // Priority among the exit conditions, stated and deterministic, not a
+  // judgment call - only one sell can actually happen per cycle, so a tie
+  // needs a rule. Stop-loss (risk control) first; the profit-target
   // fallback next (only reachable when no resting order exists at all -
-  // see placeRestingProfitTarget's own note); day-order expiry next; the
-  // rule's own reversal signal last, since it's the weakest, most passive
-  // of the four.
+  // see placeRestingProfitTarget's own note); the run's own effective
+  // deadline next (whichever of the strategy's own maxHoldDays cap or a
+  // user's earlier custom deadline applies - see
+  // lib/trading/bot-day-expiry.ts's effectiveDeadline; falls back to the
+  // default same-day close for a rule with no cap and no custom deadline,
+  // e.g. rsi_pullback); the rule's own reversal signal last, since it's the
+  // weakest, most passive of the four.
+  //
+  // ruleParams is parsed once, up front - needed for the deadline check's
+  // own `kind` now, not just the rule-exit check at the end.
+  const ruleParams = parseRuleParams(run.ruleParams);
+  const deadline = ruleParams
+    ? effectiveDeadline(ruleParams.kind, run.entryFilledAt, run.timeHorizonDeadlineAt)
+    : null;
+
   let exitReason: BotRunAutoExitReason | null = null;
 
   if (isStopLossHit(unrealizedPnlCents, stopLoss, entryTotalCents)) {
     exitReason = "closed_stop_loss";
   } else if (!targetOrder && isProfitTargetHit(unrealizedPnlCents, profitTarget, entryTotalCents)) {
     exitReason = "closed_target";
-  } else if (closingSoon) {
+  } else if (deadline !== null && now.getTime() >= deadline.getTime()) {
+    exitReason = "closed_max_hold";
+  } else if (deadline === null && closingSoon) {
+    // Only reachable for a rule with no cap AND no custom deadline at all
+    // (rsi_pullback's own default) - a run with an effective deadline
+    // (either a strategy cap or a user's own choice) that just hasn't been
+    // reached YET falls through to the rule-exit check below instead,
+    // never the default same-day close.
     exitReason = "closed_day_expiry";
   } else {
     const bars = barsMap.get(selectedSymbol);
     const closes = bars?.map((bar) => bar.closeCents) ?? [];
-    const ruleParams = parseRuleParams(run.ruleParams);
     const evaluation = ruleParams ? computeRuleExitEvaluation(ruleParams, closes) : null;
     if (evaluation && ruleShouldExit(evaluation)) {
       exitReason = "closed_rule_exit";
@@ -794,14 +885,22 @@ async function monitorOneBotRun(
   return outcome.outcome === "closed";
 }
 
-// The monitoring cycle's own four automatic exit reasons - stop-loss/
-// target/day-expiry are cross-cutting (apply regardless of which rule is
-// active), rule_exit is the rule's own reversal signal. Kept as its own
-// named type, distinct from BotRunExitReason below, since monitorOneBotRun
-// only ever DECIDES one of these four - "closed_cancelled" is never a
-// decision the monitoring cycle itself makes, only a user action.
+// The monitoring cycle's own five automatic exit reasons - stop-loss/
+// target/day-expiry/max-hold are cross-cutting (apply regardless of which
+// rule is active), rule_exit is the rule's own reversal signal. Kept as
+// its own named type, distinct from BotRunExitReason below, since
+// monitorOneBotRun only ever DECIDES one of these five - "closed_cancelled"
+// is never a decision the monitoring cycle itself makes, only a user
+// action. day_expiry and max_hold are mutually exclusive, never both
+// reachable for the same run (see effectiveDeadline in
+// lib/trading/bot-day-expiry.ts): day_expiry only fires for a rule with no
+// cap and no custom deadline at all (rsi_pullback's own default).
 type BotRunAutoExitReason =
-  "closed_stop_loss" | "closed_target" | "closed_day_expiry" | "closed_rule_exit";
+  | "closed_stop_loss"
+  | "closed_target"
+  | "closed_day_expiry"
+  | "closed_max_hold"
+  | "closed_rule_exit";
 
 // Every terminal status a "holding" run can be closed into via a real
 // market sell - the four automatic reasons above, plus a user-initiated
@@ -1050,6 +1149,7 @@ function resolvedOutcomeForStatus(
     case "closed_stop_loss":
     case "closed_target":
     case "closed_day_expiry":
+    case "closed_max_hold":
     case "closed_rule_exit":
     case "closed_cancelled":
       return { ok: false, reason: "already_closed", actualStatus: status, realizedPnlCents };

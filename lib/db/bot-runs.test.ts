@@ -53,8 +53,37 @@ vi.mock("../market/alpaca", () => ({
   // the DEFAULT_RSI_PERIOD gotcha already documented in STATE.md).
   NoTwoSidedQuoteError: class NoTwoSidedQuoteError extends Error {},
 }));
-vi.mock("../trading/market-hours", () => ({ isMarketOpen: vi.fn() }));
-vi.mock("../trading/bot-day-expiry", () => ({ isApproachingMarketClose: vi.fn() }));
+// isMarketOpen alone is mocked (test-controlled) - getMarketStatus stays
+// real. createBotRun's own deadline validation (latestAllowedDeadline,
+// lib/db/bot-runs.ts) calls nextApplicableCloseTime (lib/trading/
+// bot-day-expiry.ts) for a same-day-only rule, which needs the REAL
+// getMarketStatus to compute an actual session close time - a wholesale
+// mock of this module left getMarketStatus undefined, which nothing here
+// exercised until this round's own deadline-validation tests were the
+// first to actually call it.
+vi.mock("../trading/market-hours", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../trading/market-hours")>();
+  return {
+    ...actual,
+    isMarketOpen: vi.fn(),
+  };
+});
+// Only isApproachingMarketClose is mocked (test-controlled, per the
+// beforeEach reset below) - effectiveDeadline and nextApplicableCloseTime
+// stay real. They're pure functions of maxHoldDays/entryFilledAt/the real
+// market calendar, and every existing test here uses
+// RSI_PULLBACK_UPTREND_V2_ID (maxHoldDays === null, no cap), so the real
+// effectiveDeadline returns exactly what it always returned for these
+// tests - null with no user deadline - preserving their prior behavior
+// unchanged. Mocking it wholesale instead would require every one of
+// these pre-existing tests to stub a return value it never needed before.
+vi.mock("../trading/bot-day-expiry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../trading/bot-day-expiry")>();
+  return {
+    ...actual,
+    isApproachingMarketClose: vi.fn(),
+  };
+});
 vi.mock("../trading/indicators", () => ({
   rsi: vi.fn(),
   sma: vi.fn(),
@@ -254,49 +283,61 @@ beforeEach(async () => {
 describe("createBotRun", () => {
   it("rejects zero or negative capital", async () => {
     const userId = randomUUID();
-    const result = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: 0n,
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const result = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: 0n,
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     expect(result).toEqual({ ok: false, reason: "invalid_capital" });
   });
 
   it("rejects a profit target that exceeds the capital committed", async () => {
     const userId = randomUUID();
-    const result = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("1000.01") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const result = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("1000.01") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     expect(result).toEqual({ ok: false, reason: "invalid_profit_target" });
   });
 
   it("rejects an invalid stop-loss", async () => {
     const userId = randomUUID();
-    const result = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "percent", basisPoints: 0 },
-    });
+    const result = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "percent", basisPoints: 0 },
+      },
+      new Date(),
+    );
     expect(result).toEqual({ ok: false, reason: "invalid_stop_loss" });
   });
 
   it("creates a run in 'selecting' status with the rule id/params attached", async () => {
     const userId = randomUUID();
-    const result = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const result = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
@@ -310,14 +351,117 @@ describe("createBotRun", () => {
 
   it("rejects an unrecognized rule id, not silently falling back to any default", async () => {
     const userId = randomUUID();
-    const result = await createBotRun({
-      userId,
-      ruleId: "not_a_real_strategy",
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const result = await createBotRun(
+      {
+        userId,
+        ruleId: "not_a_real_strategy",
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     expect(result).toEqual({ ok: false, reason: "invalid_rule_id" });
+  });
+
+  // latestAllowedDeadline's own two shapes (lib/db/bot-runs.ts): a rule
+  // with no maxHoldDays cap (rsi_pullback) is bounded by
+  // nextApplicableCloseTime; a capped rule (golden_cross/breakout) is
+  // bounded by a flat N-day-from-now estimate. A real Tuesday, no holiday,
+  // no early close (2026-08-11, matching lib/trading/bot-day-expiry.
+  // test.ts's own dates) - market open at 9:35am ET, closing 4:00pm ET the
+  // same day.
+  describe("deadline validation", () => {
+    const now = new Date("2026-08-11T13:35:00Z");
+
+    it("rejects a deadline beyond rsi_pullback_uptrend_v2's same-day cap", async () => {
+      const userId = randomUUID();
+      // Tomorrow's close (2026-08-12T20:00:00Z) - one full session later
+      // than the same-day cap (today's own 2026-08-11T20:00:00Z close)
+      // allows.
+      const result = await createBotRun(
+        {
+          userId,
+          ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+          capitalCents: toCents("1000.00"),
+          profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+          stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+          timeHorizonDeadlineAt: new Date("2026-08-12T18:00:00Z"),
+        },
+        now,
+      );
+      expect(result).toEqual({ ok: false, reason: "invalid_deadline" });
+    });
+
+    it("accepts a deadline within rsi_pullback_uptrend_v2's same-day cap", async () => {
+      const userId = randomUUID();
+      // 7:00pm ET, one hour before today's own 4:00pm ET... this is stated
+      // in UTC: 19:00Z is 3:00pm ET, still before the 4:00pm ET (20:00Z)
+      // close.
+      const result = await createBotRun(
+        {
+          userId,
+          ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+          capitalCents: toCents("1000.00"),
+          profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+          stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+          timeHorizonDeadlineAt: new Date("2026-08-11T19:00:00Z"),
+        },
+        now,
+      );
+      expect(result.ok).toBe(true);
+    });
+
+    it("rejects a deadline beyond golden_cross_v1's 30-day cap", async () => {
+      const userId = randomUUID();
+      const beyondCap = new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000);
+      const result = await createBotRun(
+        {
+          userId,
+          ruleId: GOLDEN_CROSS_V1_ID,
+          capitalCents: toCents("1000.00"),
+          profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+          stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+          timeHorizonDeadlineAt: beyondCap,
+        },
+        now,
+      );
+      expect(result).toEqual({ ok: false, reason: "invalid_deadline" });
+    });
+
+    it("accepts a deadline exactly at golden_cross_v1's 30-day cap boundary", async () => {
+      const userId = randomUUID();
+      const exactlyAtCap = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const result = await createBotRun(
+        {
+          userId,
+          ruleId: GOLDEN_CROSS_V1_ID,
+          capitalCents: toCents("1000.00"),
+          profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+          stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+          timeHorizonDeadlineAt: exactlyAtCap,
+        },
+        now,
+      );
+      expect(result.ok).toBe(true);
+    });
+
+    it("rejects a deadline beyond breakout_52wk_high_v1's own 30-day cap too - not just golden_cross's", async () => {
+      const userId = randomUUID();
+      const beyondCap = new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000);
+      const result = await createBotRun(
+        {
+          userId,
+          ruleId: BREAKOUT_52WK_HIGH_V1_ID,
+          capitalCents: toCents("1000.00"),
+          profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+          stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+          timeHorizonDeadlineAt: beyondCap,
+        },
+        now,
+      );
+      expect(result).toEqual({ ok: false, reason: "invalid_deadline" });
+    });
   });
 });
 
@@ -325,13 +469,16 @@ describe("runBotWorker - selection cycle", () => {
   it("enters a run when a watchlist candidate qualifies, tagging the entry order and placing a resting profit-target sell", async () => {
     const userId = randomUUID();
     const account = await getOrCreateAccount(userId);
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     mockEligibleCandidate();
@@ -365,13 +512,16 @@ describe("runBotWorker - selection cycle", () => {
   it("leaves a run in 'selecting' when nothing on the watchlist currently qualifies", async () => {
     const userId = randomUUID();
     await getOrCreateAccount(userId);
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     mockNoEligibleCandidates();
@@ -390,13 +540,16 @@ describe("runBotWorker - selection cycle", () => {
   it("fails a run with 'failed_no_affordable_candidate' when an eligible candidate exists but its price exceeds the run's capital", async () => {
     const userId = randomUUID();
     await getOrCreateAccount(userId);
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("10.00"), // far below AAPL's $100.00 ask
-      profitTarget: { type: "dollar", valueCents: toCents("1.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("1.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("10.00"), // far below AAPL's $100.00 ask
+        profitTarget: { type: "dollar", valueCents: toCents("1.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("1.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     mockEligibleCandidate();
@@ -419,20 +572,26 @@ describe("runBotWorker - selection cycle", () => {
   // wrongly enter too.
   it("each run acts on its OWN stored ruleId/ruleParams, not a shared global rule", async () => {
     const userId = randomUUID();
-    const rsiPullbackRun = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
-    const goldenCrossRun = await createBotRun({
-      userId,
-      ruleId: GOLDEN_CROSS_V1_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const rsiPullbackRun = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
+    const goldenCrossRun = await createBotRun(
+      {
+        userId,
+        ruleId: GOLDEN_CROSS_V1_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!rsiPullbackRun.ok || !goldenCrossRun.ok) throw new Error("setup failed");
 
     mockEligibleForGoldenCrossOnly();
@@ -450,20 +609,26 @@ describe("runBotWorker - selection cycle", () => {
 
   it("enters a breakout_52wk_high_v1 run on a genuine new 365-day high with a rising SMA, while a sibling rsi_pullback run on the same cycle does not", async () => {
     const userId = randomUUID();
-    const rsiPullbackRun = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
-    const breakoutRun = await createBotRun({
-      userId,
-      ruleId: BREAKOUT_52WK_HIGH_V1_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const rsiPullbackRun = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
+    const breakoutRun = await createBotRun(
+      {
+        userId,
+        ruleId: BREAKOUT_52WK_HIGH_V1_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!rsiPullbackRun.ok || !breakoutRun.ok) throw new Error("setup failed");
 
     mockEligibleForBreakoutOnly();
@@ -558,13 +723,16 @@ describe("runBotWorker - selection cycle", () => {
 
     const userId = randomUUID();
     const account = await getOrCreateAccount(userId);
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     const outcome = await runBotWorker(new Date());
@@ -596,6 +764,188 @@ describe("runBotWorker - selection cycle", () => {
   });
 });
 
+// Same-ruleId symbol exclusivity: two runs under the SAME strategy must
+// never simultaneously hold or attempt to enter the same symbol - checked
+// inside tryEnterBotRun (lib/db/bot-runs.ts), scoped to (accountId, ruleId,
+// symbol), right after the account-row lock it already takes. A DIFFERENT
+// ruleId entering the same symbol at the same time stays valid and
+// unchanged - that's still exactly what "two different runs entering the
+// same symbol at once produce one correctly-merged position" (above, in
+// "multiple concurrent bot runs sharing one account") proves, unmodified by
+// this round.
+describe("same-ruleId symbol exclusivity", () => {
+  it("a second same-ruleId run correctly skips a symbol another same-ruleId run already holds, even when it's the ONLY candidate", async () => {
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+
+    const runA = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
+    const runB = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
+    if (!runA.ok || !runB.ok) throw new Error("setup failed");
+
+    // Only one eligible candidate (AAPL) - both runs share the same, only
+    // ranked choice under this shared ruleId.
+    mockEligibleCandidate();
+
+    const outcome = await runBotWorker(new Date());
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    // Exactly one entered - runSelectionCycle processes runA then runB
+    // sequentially within this one cycle, so runB's own entry attempt sees
+    // runA's already-committed "holding" row by the time it checks.
+    expect(outcome.counts.runsEntered).toBe(1);
+
+    const [rowA] = await db.select().from(botRuns).where(eq(botRuns.id, runA.runId));
+    const [rowB] = await db.select().from(botRuns).where(eq(botRuns.id, runB.runId));
+    const holdingRow = rowA?.status === "holding" ? rowA : rowB;
+    const stillSelectingRow = rowA?.status === "holding" ? rowB : rowA;
+
+    expect(holdingRow?.status).toBe("holding");
+    expect(holdingRow?.selectedSymbol).toBe("AAPL");
+    // Fell through correctly, not entered a second time under the same
+    // rule, and not corrupted into some other state either - still
+    // "selecting," ready to try again next cycle if a different candidate
+    // ever qualifies.
+    expect(stillSelectingRow?.status).toBe("selecting");
+    expect(stillSelectingRow?.selectedSymbol).toBeNull();
+
+    // Exactly one real position - the second run never bought in at all,
+    // not even partially.
+    const positionRows = await db
+      .select()
+      .from(positions)
+      .where(and(eq(positions.accountId, account.id), eq(positions.symbol, "AAPL")));
+    expect(positionRows).toHaveLength(1);
+    expect(positionRows[0]?.quantity).toBe(10);
+
+    await assertLedgerBalances(account.id);
+  });
+
+  // The genuine-concurrency proof the design brief calls for, not just the
+  // sequential case above: a raw connection stands in for a truly
+  // concurrent second transaction - some OTHER same-ruleId run's own real
+  // tryEnterBotRun, racing to enter AAPL at the same moment - taking the
+  // exact same account-row lock the real code takes and holding it while
+  // this test's own run (runB, via a real runBotWorker call) is blocked
+  // waiting for that same lock. Only once the raw transaction actually
+  // commits does its "holding" row become visible to anyone else - runB's
+  // own blocked attempt must see that FRESH commit once unblocked, not a
+  // stale pre-lock read taken before it ever blocked. Modeled on this
+  // file's own established technique for forcing genuine lock contention
+  // (see "a bot entry genuinely blocks on the account row's lock..." in
+  // "multiple concurrent bot runs sharing one account" above), not a
+  // reimplemented stand-in for tryEnterBotRun's own logic - the raw
+  // transaction only ever simulates WHAT a competing transaction would
+  // have already committed by the time it releases the lock, never
+  // anything about how the duplicate check itself works.
+  it("under genuine concurrency, a duplicate committed by another transaction WHILE this run's own entry attempt is blocked on the shared account-row lock is still correctly detected once unblocked - not a stale pre-lock read", async () => {
+    expect(
+      poolMax,
+      `This test needs at least 2 real concurrent DB connections to force runB's own entry ` +
+        `attempt to genuinely block on the account row's lock while a competing transaction ` +
+        `commits a same-ruleId holding row for the same symbol. (lib/db/client.ts's poolMax is ` +
+        `currently ${poolMax}, from DB_POOL_MAX.) Below 2, the two could never be in-flight on ` +
+        `separate connections at once, so this would pass trivially even with no locking at all.`,
+    ).toBeGreaterThanOrEqual(2);
+
+    const userId = randomUUID();
+    const account = await getOrCreateAccount(userId);
+    const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (!testDatabaseUrl) {
+      throw new Error("Missing TEST_DATABASE_URL");
+    }
+
+    const runB = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
+    if (!runB.ok) throw new Error("setup failed");
+
+    mockEligibleCandidate(); // AAPL, the only candidate
+
+    const rawSql = postgres(testDatabaseUrl, { prepare: false });
+    try {
+      const start = Date.now();
+      let workerStartedAfterMs: number | null = null;
+
+      const rawHold = rawSql.begin(async (tx) => {
+        await tx`select * from accounts where id = ${account.id} for update`;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        // The competing transaction's own commit - a real "holding" row
+        // (plus its real position, the same way a genuine entry fill
+        // would leave one) for AAPL under the SAME ruleId as runB, only
+        // visible to anyone else once this transaction actually commits.
+        await tx`insert into bot_runs
+          (account_id, status, rule_id, rule_params, capital_cents,
+           profit_target_type, profit_target_value_cents, stop_loss_type, stop_loss_value_cents,
+           selected_symbol, entry_total_cents, entry_quantity, entry_filled_at)
+          values
+          (${account.id}, 'holding', ${RSI_PULLBACK_UPTREND_V2_ID},
+           ${JSON.stringify({ kind: "rsi_pullback", rsiPeriod: 14, rsiEntryThreshold: 40, rsiExitThreshold: 50, smaPeriod: 50 })}::jsonb,
+           ${toCents("1000.00").toString()}, 'dollar', ${toCents("50.00").toString()},
+           'dollar', ${toCents("30.00").toString()}, 'AAPL', ${toCents("1000.00").toString()}, 10, now())`;
+        await tx`insert into positions (account_id, symbol, quantity, avg_cost_cents)
+          values (${account.id}, 'AAPL', 10, ${toCents("100.00").toString()})`;
+      });
+
+      // Give the raw hold a head start so it acquires the account lock
+      // first.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workerRun = (async () => {
+        workerStartedAfterMs = Date.now() - start;
+        return runBotWorker(new Date());
+      })();
+
+      const [, outcome] = await Promise.all([rawHold, workerRun]);
+      if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+
+      if (workerStartedAfterMs === null) throw new Error("worker never started");
+      // Started well before the 300ms hold released - genuinely blocked
+      // waiting for the account lock, not conveniently scheduled after.
+      expect(workerStartedAfterMs).toBeLessThan(300);
+
+      const [rowB] = await db.select().from(botRuns).where(eq(botRuns.id, runB.runId));
+      // Correctly detected the duplicate that only became visible once
+      // unblocked - never entered AAPL itself.
+      expect(rowB?.status).toBe("selecting");
+      expect(rowB?.selectedSymbol).toBeNull();
+
+      const positionRows = await db
+        .select()
+        .from(positions)
+        .where(and(eq(positions.accountId, account.id), eq(positions.symbol, "AAPL")));
+      // Exactly one position - the raw-simulated competing entry's own.
+      // runB never bought in on top of it.
+      expect(positionRows).toHaveLength(1);
+    } finally {
+      await rawSql.end();
+    }
+  });
+});
+
 // Sets up a real "holding" run (via a real selection cycle, not hand-
 // inserted rows) with a resting profit-target sell already placed, for the
 // monitoring-cycle tests below.
@@ -605,13 +955,16 @@ async function createHoldingRun(
   stopLossValueCents: bigint,
 ): Promise<{ runId: string; accountId: string; targetOrderId: string }> {
   const account = await getOrCreateAccount(userId);
-  const created = await createBotRun({
-    userId,
-    ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-    capitalCents: toCents("1000.00"),
-    profitTarget: { type: "dollar", valueCents: profitTargetValueCents },
-    stopLoss: { type: "dollar", valueCents: stopLossValueCents },
-  });
+  const created = await createBotRun(
+    {
+      userId,
+      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: profitTargetValueCents },
+      stopLoss: { type: "dollar", valueCents: stopLossValueCents },
+    },
+    new Date(),
+  );
   if (!created.ok) throw new Error("setup failed");
 
   mockEligibleCandidate();
@@ -625,6 +978,41 @@ async function createHoldingRun(
   if (!targetOrder) throw new Error("setup did not produce a resting target order");
 
   return { runId: created.runId, accountId: account.id, targetOrderId: targetOrder.id };
+}
+
+// Same shape as createHoldingRun above, generalized to any ruleId/candidate
+// mock - needed for the max-hold tests below, which must exercise
+// golden_cross/breakout (the two rules maxHoldDays actually caps), not just
+// rsi_pullback. `now` is threaded through explicitly (not defaulted to
+// `new Date()`) since these tests need entryFilledAt pinned to a known,
+// controllable instant to compute later "N days after entry" moments
+// against.
+async function createHoldingRunForRule(
+  userId: string,
+  ruleId: string,
+  mockCandidate: () => void,
+  profitTargetValueCents: bigint,
+  stopLossValueCents: bigint,
+  now: Date,
+): Promise<{ runId: string; accountId: string }> {
+  const account = await getOrCreateAccount(userId);
+  const created = await createBotRun(
+    {
+      userId,
+      ruleId,
+      capitalCents: toCents("1000.00"),
+      profitTarget: { type: "dollar", valueCents: profitTargetValueCents },
+      stopLoss: { type: "dollar", valueCents: stopLossValueCents },
+    },
+    now,
+  );
+  if (!created.ok) throw new Error("setup failed");
+
+  mockCandidate();
+  const outcome = await runBotWorker(now);
+  if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+
+  return { runId: created.runId, accountId: account.id };
 }
 
 describe("runBotWorker - monitoring cycle", () => {
@@ -856,6 +1244,292 @@ describe("runBotWorker - monitoring cycle", () => {
   });
 });
 
+// The maxHoldDays cap (lib/trading/bot-rule.ts) and its wiring into
+// monitorOneBotRun's own exit-priority chain via effectiveDeadline
+// (lib/trading/bot-day-expiry.ts) - golden_cross_v1/breakout_52wk_high_v1
+// only, rsi_pullback_uptrend_v2 stays same-day-only unchanged (already
+// covered, unmodified, by "closes as closed_day_expiry..." above, which
+// uses createHoldingRun's own rsi_pullback run). A fixed real Tuesday with
+// no holiday/early close (2026-08-11, matching lib/trading/
+// bot-day-expiry.test.ts's own dates) is used as the entry instant
+// throughout, so "N days after entry" arithmetic stays exact and doesn't
+// need to account for a weekend landing inside the window.
+describe("runBotWorker - max-hold (maxHoldDays / effectiveDeadline priority)", () => {
+  const entryInstant = new Date("2026-08-11T13:35:00Z");
+
+  it("closes golden_cross_v1 as closed_max_hold once the 30-day cap is reached, with no rule-exit signal and no P&L trigger", async () => {
+    const userId = randomUUID();
+    const { runId } = await createHoldingRunForRule(
+      userId,
+      GOLDEN_CROSS_V1_ID,
+      mockEligibleForGoldenCrossOnly,
+      toCents("50.00"),
+      toCents("30.00"),
+      entryInstant,
+    );
+
+    const day30 = new Date(entryInstant.getTime() + 30 * 24 * 60 * 60 * 1000);
+    // Same quote/indicator mock as entry - the rule's own reversal signal
+    // (smaFast > smaSlow) stays false throughout, and the quote never
+    // moves, so nothing but the cap itself can be what closes this. The
+    // quote's own timestamp is pinned to day30 explicitly - the shared
+    // helper's default (real wall-clock `new Date()`) would otherwise read
+    // as a stale quote against a `now` this far in the future, rejecting
+    // the exit sell for the wrong reason entirely.
+    mockEligibleForGoldenCrossOnly();
+    vi.mocked(fetchQuotes).mockResolvedValue({
+      quotes: new Map([
+        [
+          "AAPL",
+          {
+            symbol: "AAPL",
+            bidCents: toCents("99.50"),
+            askCents: toCents("100.00"),
+            timestamp: day30,
+          },
+        ],
+      ]),
+      failedSymbols: [],
+    });
+
+    const outcome = await runBotWorker(day30);
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsClosed).toBe(1);
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+    expect(run?.status).toBe("closed_max_hold");
+    expect(run?.closedAt?.getTime()).toBe(day30.getTime());
+  });
+
+  // The direct regression test for the bug caught and fixed mid-round (see
+  // STATE.md's Gotchas): a first draft nested the deadline check so that
+  // ANY non-null effective deadline - even one not yet reached - blocked
+  // the rule's own exit-signal check from ever running, for the entire
+  // 30-day window. Proves the real, shipped priority order instead: an
+  // un-reached deadline correctly falls through to the rule's own
+  // reversal signal, well before the cap itself is ever reached.
+  it("golden_cross_v1's own rule-exit signal still correctly fires well before the 30-day cap is reached", async () => {
+    const userId = randomUUID();
+    const { runId } = await createHoldingRunForRule(
+      userId,
+      GOLDEN_CROSS_V1_ID,
+      mockEligibleForGoldenCrossOnly,
+      toCents("50.00"),
+      toCents("30.00"),
+      entryInstant,
+    );
+
+    const day5 = new Date(entryInstant.getTime() + 5 * 24 * 60 * 60 * 1000);
+    vi.mocked(fetchQuotes).mockResolvedValue({
+      quotes: new Map([
+        [
+          "AAPL",
+          {
+            symbol: "AAPL",
+            bidCents: toCents("99.50"),
+            askCents: toCents("100.00"),
+            timestamp: day5,
+          },
+        ],
+      ]),
+      failedSymbols: [],
+    });
+    vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+      new Map([["AAPL", [bar(toCents("99.50"), 1_000_000)]]]),
+    );
+    // The fast SMA has now crossed back BELOW the slow SMA - golden_cross's
+    // own reversal signal, genuinely true - flipped from entry's own
+    // fast(10001) > slow(10000).
+    vi.mocked(sma).mockImplementation((_closes, period) => (period === 20 ? [9900] : [10000]));
+
+    const outcome = await runBotWorker(day5);
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsClosed).toBe(1);
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+    expect(run?.status).toBe("closed_rule_exit"); // not closed_max_hold - day 5 is nowhere near day 30
+  });
+
+  it("a user's own earlier deadline pulls golden_cross_v1's exit earlier than the strategy's 30-day cap", async () => {
+    const userId = randomUUID();
+    const userDeadline = new Date(entryInstant.getTime() + 10 * 24 * 60 * 60 * 1000);
+
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: GOLDEN_CROSS_V1_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+        timeHorizonDeadlineAt: userDeadline,
+      },
+      entryInstant,
+    );
+    if (!created.ok) throw new Error("setup failed");
+
+    mockEligibleForGoldenCrossOnly();
+    const enterOutcome = await runBotWorker(entryInstant);
+    if (!enterOutcome.ok) throw new Error(`worker failed: ${enterOutcome.error}`);
+
+    const day10 = new Date(entryInstant.getTime() + 10 * 24 * 60 * 60 * 1000);
+    // Same mock as entry - the rule's own signal stays false, so only the
+    // user's own (earlier) deadline can be what closes this at day 10,
+    // twenty full days before the strategy's own 30-day cap would. Quote
+    // timestamp pinned to day10 explicitly - see the cap-reached test
+    // above for why the shared helper's own default can't be trusted here.
+    mockEligibleForGoldenCrossOnly();
+    vi.mocked(fetchQuotes).mockResolvedValue({
+      quotes: new Map([
+        [
+          "AAPL",
+          {
+            symbol: "AAPL",
+            bidCents: toCents("99.50"),
+            askCents: toCents("100.00"),
+            timestamp: day10,
+          },
+        ],
+      ]),
+      failedSymbols: [],
+    });
+
+    const outcome = await runBotWorker(day10);
+    if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+    expect(outcome.counts.runsClosed).toBe(1);
+
+    const [run] = await db.select().from(botRuns).where(eq(botRuns.id, created.runId));
+    // Still closed_max_hold - effectiveDeadline's own status applies
+    // regardless of which of the two (strategy cap vs. user deadline) was
+    // actually earlier; only the TIMING below distinguishes them.
+    expect(run?.status).toBe("closed_max_hold");
+    expect(run?.closedAt?.getTime()).toBe(day10.getTime());
+  });
+
+  // The design brief's own explicit ask: confirm, with a real test rather
+  // than reasoning alone, that the resting profit-target order and the
+  // live stop-loss check both genuinely survive a multi-day hold spanning
+  // a real weekend closure - now that day-order-expiry no longer force-
+  // exits a capped rule on ordinary daily close. Same real Friday/Monday
+  // pair nextApplicableCloseTime's own test already established (2026-08-
+  // 14 is a Friday, 2026-08-17 the following Monday - 2026-08-15/16 the
+  // real weekend in between).
+  describe("surviving a real multi-day hold spanning a weekend gap", () => {
+    const friday = new Date("2026-08-14T13:35:00Z");
+    const monday = new Date("2026-08-17T14:00:00Z");
+
+    it("the resting profit-target limit order still correctly fills after the gap, closing golden_cross_v1 as closed_target", async () => {
+      const userId = randomUUID();
+      const { runId, accountId } = await createHoldingRunForRule(
+        userId,
+        GOLDEN_CROSS_V1_ID,
+        mockEligibleForGoldenCrossOnly,
+        toCents("50.00"),
+        toCents("30.00"),
+        friday,
+      );
+
+      const [targetOrder] = await db
+        .select({ id: orders.id })
+        .from(orders)
+        .where(and(eq(orders.botRunId, runId), eq(orders.side, "sell")));
+      if (!targetOrder) throw new Error("setup did not produce a resting target order");
+
+      // A Monday quote whose bid sits exactly AT the resting $105.00 limit
+      // ($1000.00 entry + $50.00 target over 10 shares) - the limit-order
+      // worker's own normal fill path, exercised across the real gap, not
+      // reimplemented here. Deliberately exact, not just "crosses it": a
+      // real fill happens at the CURRENT quote (at least as good as the
+      // limit, per shouldFillLimitOrder/executeMarketOrder - see
+      // limit-order-worker.ts), not automatically at the stated limit
+      // price, so a bid strictly above $105.00 would fill at that better
+      // price instead and make the realized P&L below a moving target
+      // rather than the clean $50.00 this test wants to assert.
+      vi.mocked(isMarketOpen).mockReturnValue(true);
+      vi.mocked(fetchQuotes).mockResolvedValue({
+        quotes: new Map([
+          [
+            "AAPL",
+            {
+              symbol: "AAPL",
+              bidCents: toCents("105.00"),
+              askCents: toCents("105.50"),
+              timestamp: monday,
+            },
+          ],
+        ]),
+        failedSymbols: [],
+      });
+
+      const fillOutcome = await runLimitOrderWorker(monday);
+      if (!fillOutcome.ok) throw new Error(`limit-order worker failed: ${fillOutcome.error}`);
+      expect(fillOutcome.counts.ordersFilled).toBe(1);
+
+      // The monitoring cycle's own bookkeeping-only close
+      // (closeAlreadyFilledBotRun) picks up the already-filled order -
+      // proves this path still works correctly for a capped rule, not
+      // pre-empted by anything else along the way.
+      vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+        new Map([["AAPL", [bar(toCents("106.00"), 1_000_000)]]]),
+      );
+      const outcome = await runBotWorker(monday);
+      if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+      expect(outcome.counts.runsClosed).toBe(1);
+
+      const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+      expect(run?.status).toBe("closed_target");
+      expect(run?.realizedPnlCents).toBe(toCents("50.00"));
+
+      await assertLedgerBalances(accountId);
+    });
+
+    it("the live stop-loss check still correctly fires after the gap", async () => {
+      const userId = randomUUID();
+      const { runId, accountId } = await createHoldingRunForRule(
+        userId,
+        GOLDEN_CROSS_V1_ID,
+        mockEligibleForGoldenCrossOnly,
+        toCents("50.00"),
+        toCents("30.00"),
+        friday,
+      );
+
+      vi.mocked(fetchQuotes).mockResolvedValue({
+        quotes: new Map([
+          [
+            "AAPL",
+            {
+              symbol: "AAPL",
+              bidCents: toCents("96.00"),
+              askCents: toCents("97.00"),
+              timestamp: monday,
+            },
+          ],
+        ]),
+        failedSymbols: [],
+      });
+      vi.mocked(fetchDailyBarsForSymbols).mockResolvedValue(
+        new Map([["AAPL", [bar(toCents("96.00"), 1_000_000)]]]),
+      );
+      // The rule's own signal stays a genuine uptrend (fast > slow) - the
+      // stop-loss check, not a coincidental rule-exit, must be what
+      // actually closes this.
+      vi.mocked(sma).mockImplementation((_closes, period) => (period === 20 ? [10100] : [10000]));
+
+      const outcome = await runBotWorker(monday);
+      if (!outcome.ok) throw new Error(`worker failed: ${outcome.error}`);
+      expect(outcome.counts.runsClosed).toBe(1);
+
+      const [run] = await db.select().from(botRuns).where(eq(botRuns.id, runId));
+      expect(run?.status).toBe("closed_stop_loss");
+      // $1000.00 entry - $960.00 exit (10 * $96.00) = -$40.00, crossing
+      // the $30.00 stop-loss threshold.
+      expect(run?.realizedPnlCents).toBe(-toCents("40.00"));
+
+      await assertLedgerBalances(accountId);
+    });
+  });
+});
+
 describe("runBotWorker - invocation logging", () => {
   // The whole point of this table: distinguishing "the worker ran and
   // found nothing to do" from "the worker didn't run at all" - both looked
@@ -894,13 +1568,16 @@ describe("runBotWorker - invocation logging", () => {
 
   it("records the real counts from a successful invocation, matching what the route itself returns", async () => {
     const userId = randomUUID();
-    await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     mockEligibleCandidate();
 
     const outcome = await runBotWorker(new Date());
@@ -920,13 +1597,16 @@ describe("runBotWorker - invocation logging", () => {
 
   it("marks the run failed with the real error message when a cycle throws", async () => {
     const userId = randomUUID();
-    await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     // A selecting run must exist for runSelectionCycle to reach the Alpaca
     // calls at all (it short-circuits before them otherwise) - see the test
     // above.
@@ -947,13 +1627,16 @@ describe("runBotWorker - invocation logging", () => {
 describe("cancelBotRun", () => {
   it("cancels a 'selecting' run with no position, flipping it straight to cancelled", async () => {
     const userId = randomUUID();
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     const result = await cancelBotRun(userId, created.runId, new Date());
@@ -1034,13 +1717,16 @@ describe("cancelBotRun", () => {
   // "not_found".
   it("returns not_found (not a permission error) for a run that belongs to a different account", async () => {
     const ownerUserId = randomUUID();
-    const created = await createBotRun({
-      userId: ownerUserId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId: ownerUserId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     const result = await cancelBotRun(randomUUID(), created.runId, new Date());
@@ -1052,13 +1738,16 @@ describe("cancelBotRun", () => {
 
   it("returns already_resolved (not a repeat success) when cancelling an already-cancelled run", async () => {
     const userId = randomUUID();
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     const first = await cancelBotRun(userId, created.runId, new Date());
@@ -1153,13 +1842,16 @@ describe("cancelBotRun - races with the worker", () => {
       throw new Error("Missing TEST_DATABASE_URL");
     }
 
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     const rawSql = postgres(testDatabaseUrl, { prepare: false });
@@ -1217,13 +1909,16 @@ describe("cancelBotRun - races with the worker", () => {
       throw new Error("Missing TEST_DATABASE_URL");
     }
 
-    const created = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("1000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("50.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const created = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("1000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("50.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!created.ok) throw new Error("setup failed");
 
     mockEligibleCandidate(); // AAPL genuinely qualifies - the worker WOULD enter this run if it could
@@ -1404,13 +2099,16 @@ describe("multiple concurrent bot runs sharing one account", () => {
     // incorrectly used a stale pre-hold balance (or didn't wait for the
     // lock at all), it would wrongly succeed; if it correctly waits and
     // re-reads, it must reject as insufficient_funds.
-    const run = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("80000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("2000.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("2000.00") },
-    });
+    const run = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("80000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("2000.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("2000.00") },
+      },
+      new Date(),
+    );
     if (!run.ok) throw new Error("setup failed");
 
     mockEligibleCandidate(); // AAPL at ask $100.00 / bid $99.50
@@ -1496,20 +2194,26 @@ describe("multiple concurrent bot runs sharing one account", () => {
     // mutation layer neither reads nor cares about ruleId, which is what
     // this test confirms still holds once two genuinely different rules
     // both fire on the same symbol at once.
-    const runA = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("10000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("500.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("300.00") },
-    });
-    const runB = await createBotRun({
-      userId,
-      ruleId: GOLDEN_CROSS_V1_ID,
-      capitalCents: toCents("20000.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("500.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("300.00") },
-    });
+    const runA = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("10000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("500.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("300.00") },
+      },
+      new Date(),
+    );
+    const runB = await createBotRun(
+      {
+        userId,
+        ruleId: GOLDEN_CROSS_V1_ID,
+        capitalCents: toCents("20000.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("500.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("300.00") },
+      },
+      new Date(),
+    );
     if (!runA.ok || !runB.ok) throw new Error("setup failed");
 
     mockEligibleForBothRuleFamilies(); // AAPL qualifies under rsi_pullback AND golden_cross at once
@@ -1550,20 +2254,26 @@ describe("getBotRunsForAccount", () => {
     const account = await getOrCreateAccount(userId);
     mockNoEligibleCandidates();
 
-    const first = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("500.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("20.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("20.00") },
-    });
-    const second = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("700.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("30.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("30.00") },
-    });
+    const first = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("500.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("20.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("20.00") },
+      },
+      new Date(),
+    );
+    const second = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("700.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("30.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("30.00") },
+      },
+      new Date(),
+    );
     if (!first.ok || !second.ok) throw new Error("setup failed");
 
     const runs = await getBotRunsForAccount(account.id);
@@ -1577,13 +2287,16 @@ describe("getActiveBotRunCount", () => {
     const account = await getOrCreateAccount(userId);
 
     mockNoEligibleCandidates();
-    const stillSelecting = await createBotRun({
-      userId,
-      ruleId: RSI_PULLBACK_UPTREND_V2_ID,
-      capitalCents: toCents("500.00"),
-      profitTarget: { type: "dollar", valueCents: toCents("20.00") },
-      stopLoss: { type: "dollar", valueCents: toCents("20.00") },
-    });
+    const stillSelecting = await createBotRun(
+      {
+        userId,
+        ruleId: RSI_PULLBACK_UPTREND_V2_ID,
+        capitalCents: toCents("500.00"),
+        profitTarget: { type: "dollar", valueCents: toCents("20.00") },
+        stopLoss: { type: "dollar", valueCents: toCents("20.00") },
+      },
+      new Date(),
+    );
     if (!stillSelecting.ok) throw new Error("setup failed");
 
     await db.insert(botRuns).values({

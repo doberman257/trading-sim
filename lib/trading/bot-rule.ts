@@ -46,6 +46,16 @@ export const RSI_PULLBACK_UPTREND_V1_PARAMS: RsiPullbackParams = {
 // comment above states: bot_runs rows already recorded under v1 must keep
 // meaning what they meant when they were run, not be silently
 // reinterpreted by a later parameter change.
+//
+// Stays same-day-only (see maxHoldDays below) even though a real
+// historical scan of its own natural hold-to-exit time shows a 14-day
+// median, not same-day (50-day p90, 217 real episodes, ~5yr/517-symbol
+// backtest) - deliberately: this is the one strategy meant to be measured
+// as pure intraday mean-reversion, a design choice for comparison against
+// the other two's multi-day holds, not a claim that same-day matches its
+// own natural resolution time. If that reasoning ever stops applying,
+// revisit with the real number above, not by assuming same-day was always
+// backtested-accurate for this rule either.
 export const RSI_PULLBACK_UPTREND_V2_ID = "rsi_pullback_uptrend_v2";
 
 export const RSI_PULLBACK_UPTREND_V2_PARAMS: RsiPullbackParams = {
@@ -75,6 +85,16 @@ export const GOLDEN_CROSS_V1_PARAMS: GoldenCrossParams = {
   fastPeriod: 20,
   slowPeriod: 50,
 };
+
+// Capped at a hard 30-day max hold (see maxHoldDays below) - a real
+// historical scan (~5yr/517-symbol backtest, 6,388 real episodes) found a
+// 55-day median natural hold-to-exit time, 140-day p90, 462-day max: this
+// cap BINDS on 77.8% of episodes, meaning the cap - not the rule's own
+// reversal signal - is what closes most runs in practice, not a rare
+// backstop. Accepted deliberately, not an oversight: the same trade-off is
+// documented on BREAKOUT_52WK_HIGH_V1_PARAMS below, where it binds far more
+// often still (98.7%) - see that comment for the full reasoning, which
+// applies here too.
 
 // Breakout's params shape. `breakoutWindowDays` is also the period of the
 // "is the trend rising" SMA check (see ruleShouldEnter below) - one window
@@ -128,6 +148,23 @@ export const BREAKOUT_52WK_HIGH_V1_PARAMS: BreakoutParams = {
   exitSmaPeriod: 365,
 };
 
+// Capped at a hard 30-day max hold (see maxHoldDays below), and this
+// number deserves the same plain-numbers treatment the id's own rejected-
+// 20-day note above gets - it is not a rare backstop for this rule. A real
+// historical scan (~5yr/517-symbol backtest, 7,531 real episodes) found a
+// 260-day median natural hold-to-exit time, a 608-day p90, and a 1,150-day
+// max: the 30-day cap BINDS on 98.7% of episodes. In plain terms, this
+// redefines breakout_52wk_high_v1 in practice from "ride a real trend
+// until it reverses" (what the rule's own SMA(365) exit condition is
+// actually designed to do) to "hold roughly 30 days, then force-exit
+// regardless of the trend" - the cap, not the rule's own signal, is what
+// closes nearly every run. **This is a known, accepted trade-off, decided
+// deliberately with this exact number in front of the decision-maker, not
+// an oversight discovered later.** A future session revisiting the 30-day
+// figure should re-run this same scan rather than assume the original
+// number still reflects current market behavior, but should not read this
+// comment as inviting a "the cap barely matters" assumption either way -
+// it very much does.
 export type BotRuleParams = RsiPullbackParams | GoldenCrossParams | BreakoutParams;
 
 // The one registry every caller needing to know "which rules can a human
@@ -158,6 +195,33 @@ export const AVAILABLE_STRATEGIES: Record<
     description: "Momentum: buys a new 365-day high with a rising SMA(365) over the last 20 days.",
   },
 };
+
+// How long a "holding" run under this rule family may be held before being
+// force-exited regardless of any other condition - null means no cap
+// beyond the existing same-day day-order-expiry check
+// (lib/trading/bot-day-expiry.ts). A property of the RULE FAMILY (dispatch
+// on `kind`), not a stored ruleParams field: every version of a family is
+// meant to share the same holding-period philosophy even as its own
+// numeric thresholds change across versions (v1 vs v2's own entry
+// threshold, say), and keeping it out of the stored JSON avoids a legacy-
+// row backward-compat question for every already-recorded run the way a
+// new required field would (the same reasoning inferLegacyKind already
+// exists to solve for `kind` itself). See RSI_PULLBACK_UPTREND_V2_PARAMS,
+// GOLDEN_CROSS_V1_PARAMS, and BREAKOUT_52WK_HIGH_V1_PARAMS's own comments
+// above for the real historical numbers this was decided against - both
+// non-null values were chosen with the real, honest knowledge that the cap
+// itself would bind far more often than the rule's own reversal signal,
+// not despite it.
+export function maxHoldDays(kind: BotRuleParams["kind"]): number | null {
+  switch (kind) {
+    case "rsi_pullback":
+      return null;
+    case "golden_cross":
+      return 30;
+    case "breakout":
+      return 30;
+  }
+}
 
 // Already-computed indicator values for one symbol at one point in time -
 // not a price series. Computing RSI/SMA from a raw closes array is a

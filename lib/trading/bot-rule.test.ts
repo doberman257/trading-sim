@@ -6,6 +6,7 @@ import {
   describeBotRuleParams,
   GOLDEN_CROSS_V1_ID,
   GOLDEN_CROSS_V1_PARAMS,
+  maxHoldDays,
   parseRuleParams,
   RSI_PULLBACK_UPTREND_V1_ID,
   RSI_PULLBACK_UPTREND_V1_PARAMS,
@@ -346,5 +347,16 @@ describe("describeBotRuleParams", () => {
   it("returns null, not a throw, for something unparseable", () => {
     expect(describeBotRuleParams({ garbage: true })).toBeNull();
     expect(describeBotRuleParams(null)).toBeNull();
+  });
+});
+
+describe("maxHoldDays", () => {
+  it("is null for rsi_pullback - same-day-only, unchanged (deliberate design choice, see the params' own comment)", () => {
+    expect(maxHoldDays("rsi_pullback")).toBeNull();
+  });
+
+  it("is 30 for golden_cross and breakout - a real, deliberately-accepted cap (see each params constant's own comment for the real historical binding rate)", () => {
+    expect(maxHoldDays("golden_cross")).toBe(30);
+    expect(maxHoldDays("breakout")).toBe(30);
   });
 });
