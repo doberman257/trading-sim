@@ -12,6 +12,7 @@ export type BotRunStatus =
   | "holding"
   | "closed_stop_loss"
   | "closed_day_expiry"
+  | "closed_max_hold"
   | "closed_target"
   | "closed_rule_exit"
   | "failed_no_affordable_candidate"
@@ -69,6 +70,8 @@ function statusLabel(status: BotRunStatus): string {
       return "Closed - stop-loss hit";
     case "closed_day_expiry":
       return "Closed - day expiry";
+    case "closed_max_hold":
+      return "Closed - max hold reached";
     case "closed_rule_exit":
       return "Closed - rule exit";
     case "failed_no_affordable_candidate":

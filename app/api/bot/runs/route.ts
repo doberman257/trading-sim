@@ -58,14 +58,17 @@ export async function POST(req: Request): Promise<Response> {
 
   const { ruleId, capitalCents, profitTarget, stopLoss, timeHorizonDeadlineAt } = parsed.data;
 
-  const result = await createBotRun({
-    userId: auth.userId,
-    ruleId,
-    capitalCents,
-    profitTarget: profitTarget as TargetConfig,
-    stopLoss: stopLoss as TargetConfig,
-    timeHorizonDeadlineAt: timeHorizonDeadlineAt ? new Date(timeHorizonDeadlineAt) : null,
-  });
+  const result = await createBotRun(
+    {
+      userId: auth.userId,
+      ruleId,
+      capitalCents,
+      profitTarget: profitTarget as TargetConfig,
+      stopLoss: stopLoss as TargetConfig,
+      timeHorizonDeadlineAt: timeHorizonDeadlineAt ? new Date(timeHorizonDeadlineAt) : null,
+    },
+    new Date(),
+  );
 
   if (!result.ok) {
     return NextResponse.json({ ok: false, reason: result.reason }, { status: 422 });

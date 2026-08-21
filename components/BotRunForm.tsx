@@ -2,13 +2,18 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition, type FormEvent } from "react";
-import { AVAILABLE_STRATEGIES } from "@/lib/trading/bot-rule";
+import { nextApplicableCloseTime } from "@/lib/trading/bot-day-expiry";
+import { AVAILABLE_STRATEGIES, maxHoldDays, type BotRuleParams } from "@/lib/trading/bot-rule";
 import { toCents } from "@/lib/trading/money";
 
 type TargetType = "dollar" | "percent";
 
 type CreateBotRunErrorReason =
-  "invalid_capital" | "invalid_profit_target" | "invalid_stop_loss" | "invalid_rule_id";
+  | "invalid_capital"
+  | "invalid_profit_target"
+  | "invalid_stop_loss"
+  | "invalid_rule_id"
+  | "invalid_deadline";
 
 function reasonMessage(reason: CreateBotRunErrorReason): string {
   switch (reason) {
@@ -20,11 +25,55 @@ function reasonMessage(reason: CreateBotRunErrorReason): string {
       return "Stop-loss must be valid (a dollar amount up to the capital committed, or a percent between 0 and 100).";
     case "invalid_rule_id":
       return "Choose a strategy for this run.";
+    case "invalid_deadline":
+      return "Deadline is later than this strategy's own maximum hold - choose an earlier one.";
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;
     }
   }
+}
+
+// Mirrors latestAllowedDeadline in lib/db/bot-runs.ts exactly (same two
+// pure functions, same "no cap -> same-day close, capped -> N days from
+// now" shape) - a client-side ESTIMATE for immediate inline feedback only,
+// using this browser's own clock for `now`. createBotRun's own copy is the
+// real, authoritative check (using the server's own clock at the moment of
+// submission) - this one exists purely so a user sees why a deadline will
+// be rejected before they ever submit, not to replace that check.
+function latestAllowedDeadlineEstimate(kind: BotRuleParams["kind"], now: Date): Date {
+  const days = maxHoldDays(kind);
+  if (days === null) {
+    return nextApplicableCloseTime(now);
+  }
+  return new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+// The inline rejection message shown directly under the deadline field
+// once its value reads as too late for the selected strategy - stated in
+// the same terms as the cap itself (a flat day count, or "today's own
+// market close"), not a generic "invalid deadline."
+function deadlineTooLateMessage(kind: BotRuleParams["kind"]): string {
+  const days = maxHoldDays(kind);
+  return days === null
+    ? "Deadline can't be later than today's own market close for this strategy."
+    : `Deadline can't be later than ${days} days from now for this strategy.`;
+}
+
+// The blank-deadline help text's own per-strategy ending - what actually
+// happens with no custom deadline set, stated plainly rather than left
+// vague ("no earlier deadline" used to describe every strategy identically
+// even though timeHorizonDeadlineAt was a complete no-op at the time that
+// copy was written - see STATE.md's Gotchas). null maxHoldDays
+// (rsi_pullback) closes same-day; a capped rule closes at its own N-day
+// max hold, at the latest.
+function blankDeadlineHelpText(kind: BotRuleParams["kind"]): string {
+  const days = maxHoldDays(kind);
+  const capClause =
+    days === null
+      ? "close automatically at today's own market close (same-day only for this strategy)"
+      : `close automatically after ${days} days at the latest (this strategy's own max hold)`;
+  return `Leave blank to ${capClause} if no rule-based exit (profit target, stop-loss, or the rule's own reversal signal) fires first.`;
 }
 
 // AVAILABLE_STRATEGIES is plain data (see bot-rule.ts's own comment on the
@@ -132,12 +181,28 @@ export function BotRunForm() {
     capitalCents = null;
   }
 
+  const selectedKind = AVAILABLE_STRATEGIES[ruleId]?.params.kind ?? null;
+
+  // Parsed once and reused by both the inline field message below and
+  // getDisabledReason - a genuinely invalid datetime-local value (should be
+  // structurally impossible from the browser's own picker, but not worth
+  // trusting blindly) reads as "no deadline chosen" here, the same as
+  // leaving the field blank, rather than a separate error state.
+  const deadlineDate =
+    deadlineInput.trim().length > 0 && !Number.isNaN(new Date(deadlineInput).getTime())
+      ? new Date(deadlineInput)
+      : null;
+  const deadlineCap = selectedKind ? latestAllowedDeadlineEstimate(selectedKind, new Date()) : null;
+  const deadlineTooLate =
+    deadlineDate !== null && deadlineCap !== null && deadlineDate.getTime() > deadlineCap.getTime();
+
   const disabledReason = getDisabledReason();
 
   function getDisabledReason(): string | null {
     if (capitalCents === null || capitalCents <= 0n) return "Enter a capital amount.";
     if (profitTargetInput.trim().length === 0) return "Enter a profit target.";
     if (stopLossInput.trim().length === 0) return "Enter a stop-loss.";
+    if (deadlineTooLate) return "Choose a deadline within this strategy's own maximum hold.";
     return null;
   }
 
@@ -264,12 +329,19 @@ export function BotRunForm() {
             type="datetime-local"
             value={deadlineInput}
             onChange={(event) => setDeadlineInput(event.target.value)}
+            aria-invalid={deadlineTooLate}
             className={inputClassName}
           />
-          <span className="text-subtle text-xs leading-snug">
-            Leave blank to use only the rule&apos;s own exits (profit target, stop-loss, RSI
-            recovery, or end-of-day) - no earlier deadline.
-          </span>
+          {deadlineTooLate && selectedKind && (
+            <span role="alert" className="text-warn text-xs leading-snug">
+              {deadlineTooLateMessage(selectedKind)}
+            </span>
+          )}
+          {!deadlineTooLate && deadlineInput.trim().length === 0 && selectedKind && (
+            <span className="text-subtle text-xs leading-snug">
+              {blankDeadlineHelpText(selectedKind)}
+            </span>
+          )}
         </label>
 
         {error && (
