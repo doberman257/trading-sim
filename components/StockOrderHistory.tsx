@@ -1,6 +1,11 @@
+"use client";
+
+import { useState } from "react";
 import { OrderStatusBadge } from "./OrderStatusBadge";
+import { Pagination } from "./Pagination";
 import { formatOrderTimestamp } from "./RecentOrdersPanel";
 import type { OrderStatus } from "@/lib/db/portfolio";
+import { DEFAULT_PAGE_SIZE, clampPage, getPageCount, paginate } from "@/lib/pagination";
 import { formatCents } from "@/lib/trading/money";
 import type { Side } from "@/lib/trading/types";
 
@@ -26,6 +31,9 @@ export type StockOrderHistoryProps = {
 // this page's own symbol on every row.
 export function StockOrderHistory({ orders }: StockOrderHistoryProps) {
   const now = new Date();
+  const [page, setPage] = useState(1);
+  const pageCount = getPageCount(orders.length, DEFAULT_PAGE_SIZE);
+  const pageOrders = paginate(orders, page, DEFAULT_PAGE_SIZE);
 
   return (
     <section className="border-default bg-panel rounded-lg border">
@@ -77,13 +85,13 @@ export function StockOrderHistory({ orders }: StockOrderHistoryProps) {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((order) => (
+                {pageOrders.map((order) => (
                   <tr
                     key={order.id}
                     className="border-default/50 hover:bg-elevated border-b transition-colors"
                   >
                     {/* Not gain/loss colored: buy/sell side isn't itself a
-                        financial direction - see RecentOrdersPanel's own note. */}
+                          financial direction - see RecentOrdersPanel's own note. */}
                     <td className="text-fg px-3 py-2.5 capitalize">{order.side}</td>
                     <td className="text-fg px-3 py-2.5 text-right font-mono tabular-nums">
                       {order.quantity}
@@ -105,7 +113,7 @@ export function StockOrderHistory({ orders }: StockOrderHistoryProps) {
             </table>
 
             <div className="flex flex-col gap-2 lg:hidden">
-              {orders.map((order) => (
+              {pageOrders.map((order) => (
                 <div key={order.id} className="border-default bg-elevated rounded-md border p-3">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-fg font-medium capitalize">{order.side}</span>
@@ -132,6 +140,11 @@ export function StockOrderHistory({ orders }: StockOrderHistoryProps) {
                 </div>
               ))}
             </div>
+            <Pagination
+              page={clampPage(page, pageCount)}
+              pageCount={pageCount}
+              onPageChange={setPage}
+            />
           </>
         )}
       </div>
