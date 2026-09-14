@@ -1,5 +1,10 @@
+"use client";
+
+import { useState } from "react";
+import { Pagination } from "./Pagination";
 import { PositionCard } from "./PositionCard";
 import { PositionRow } from "./PositionRow";
+import { DEFAULT_PAGE_SIZE, clampPage, getPageCount, paginate } from "@/lib/pagination";
 import type { PositionValuation } from "@/lib/trading/portfolio";
 
 export type PositionsPanelProps = {
@@ -11,6 +16,10 @@ export type PositionsPanelProps = {
 };
 
 export function PositionsPanel({ positions, isStale, sparklines }: PositionsPanelProps) {
+  const [page, setPage] = useState(1);
+  const pageCount = getPageCount(positions.length, DEFAULT_PAGE_SIZE);
+  const pagePositions = paginate(positions, page, DEFAULT_PAGE_SIZE);
+
   return (
     <section className="border-default bg-panel rounded-lg border">
       <header className="border-default flex items-center justify-between border-b px-4 py-2.5">
@@ -73,7 +82,7 @@ export function PositionsPanel({ positions, isStale, sparklines }: PositionsPane
                 </tr>
               </thead>
               <tbody>
-                {positions.map((position) => (
+                {pagePositions.map((position) => (
                   <PositionRow
                     key={position.symbol}
                     symbol={position.symbol}
@@ -91,7 +100,7 @@ export function PositionsPanel({ positions, isStale, sparklines }: PositionsPane
             </table>
 
             <div className="flex flex-col gap-2 lg:hidden">
-              {positions.map((position) => (
+              {pagePositions.map((position) => (
                 <PositionCard
                   key={position.symbol}
                   symbol={position.symbol}
@@ -106,6 +115,11 @@ export function PositionsPanel({ positions, isStale, sparklines }: PositionsPane
                 />
               ))}
             </div>
+            <Pagination
+              page={clampPage(page, pageCount)}
+              pageCount={pageCount}
+              onPageChange={setPage}
+            />
           </>
         )}
       </div>

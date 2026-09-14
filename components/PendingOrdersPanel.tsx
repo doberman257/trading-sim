@@ -2,6 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { Pagination } from "./Pagination";
+import { DEFAULT_PAGE_SIZE, clampPage, getPageCount, paginate } from "@/lib/pagination";
 import { formatCents } from "@/lib/trading/money";
 import type { CancelOrderReason, Side } from "@/lib/trading/types";
 
@@ -52,6 +54,9 @@ export function PendingOrdersPanel({ orders, workerStale }: PendingOrdersPanelPr
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [errorByOrderId, setErrorByOrderId] = useState<Record<string, string>>({});
   const [, startTransition] = useTransition();
+  const [page, setPage] = useState(1);
+  const pageCount = getPageCount(orders.length, DEFAULT_PAGE_SIZE);
+  const pageOrders = paginate(orders, page, DEFAULT_PAGE_SIZE);
 
   function handleCancel(orderId: string) {
     setCancellingId(orderId);
@@ -105,35 +110,42 @@ export function PendingOrdersPanel({ orders, workerStale }: PendingOrdersPanelPr
         {orders.length === 0 ? (
           <p className="text-muted py-6 text-center text-sm">No pending limit orders.</p>
         ) : (
-          <div className="flex flex-col gap-2">
-            {orders.map((order) => (
-              <div
-                key={order.id}
-                className="border-default bg-elevated flex items-center justify-between gap-3 rounded-md border p-3"
-              >
-                <div>
-                  <div className="text-fg text-sm font-medium">
-                    {/* Not gain/loss colored - buy/sell side isn't itself a
-                        financial direction, same convention as
-                        RecentOrdersPanel's Side column. */}
-                    <span className="capitalize">{order.side}</span> {order.quantity} {order.symbol}{" "}
-                    @ ${formatCents(BigInt(order.limitPriceCents))}
-                  </div>
-                  {errorByOrderId[order.id] && (
-                    <p className="text-warn mt-1 text-xs">{errorByOrderId[order.id]}</p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleCancel(order.id)}
-                  disabled={cancellingId === order.id}
-                  className="border-default hover:bg-selected shrink-0 rounded-md border px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+          <>
+            <div className="flex flex-col gap-2">
+              {pageOrders.map((order) => (
+                <div
+                  key={order.id}
+                  className="border-default bg-elevated flex items-center justify-between gap-3 rounded-md border p-3"
                 >
-                  {cancellingId === order.id ? "Cancelling…" : "Cancel"}
-                </button>
-              </div>
-            ))}
-          </div>
+                  <div>
+                    <div className="text-fg text-sm font-medium">
+                      {/* Not gain/loss colored - buy/sell side isn't itself a
+                          financial direction, same convention as
+                          RecentOrdersPanel's Side column. */}
+                      <span className="capitalize">{order.side}</span> {order.quantity}{" "}
+                      {order.symbol} @ ${formatCents(BigInt(order.limitPriceCents))}
+                    </div>
+                    {errorByOrderId[order.id] && (
+                      <p className="text-warn mt-1 text-xs">{errorByOrderId[order.id]}</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleCancel(order.id)}
+                    disabled={cancellingId === order.id}
+                    className="border-default hover:bg-selected shrink-0 rounded-md border px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {cancellingId === order.id ? "Cancelling…" : "Cancel"}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <Pagination
+              page={clampPage(page, pageCount)}
+              pageCount={pageCount}
+              onPageChange={setPage}
+            />
+          </>
         )}
       </div>
     </section>

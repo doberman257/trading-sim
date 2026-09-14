@@ -18,6 +18,11 @@ export type PortfolioOrder = {
   quantity: number;
   status: OrderStatus;
   filledPriceCents: bigint | null;
+  // Only ever set alongside status "rejected" - RecentOrdersPanel's own
+  // consecutive-identical-rejection collapsing needs this to know whether
+  // two adjacent rejected rows are genuinely the same repeated failure, not
+  // just relying on symbol/side/status alone.
+  rejectReason: string | null;
   createdAt: Date;
   filledAt: Date | null;
 };
@@ -58,6 +63,7 @@ export async function getPortfolio(accountId: string): Promise<Portfolio> {
       orderQuantity: recentOrders.quantity,
       orderStatus: recentOrders.status,
       orderFilledPriceCents: recentOrders.filledPriceCents,
+      orderRejectReason: recentOrders.rejectReason,
       orderCreatedAt: recentOrders.createdAt,
       orderFilledAt: recentOrders.filledAt,
     })
@@ -103,6 +109,7 @@ export async function getPortfolio(accountId: string): Promise<Portfolio> {
         quantity: row.orderQuantity,
         status: row.orderStatus,
         filledPriceCents: row.orderFilledPriceCents,
+        rejectReason: row.orderRejectReason,
         createdAt: row.orderCreatedAt,
         filledAt: row.orderFilledAt,
       });

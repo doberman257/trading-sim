@@ -1,12 +1,21 @@
+"use client";
+
+import { useState } from "react";
+import { Pagination } from "./Pagination";
 import { WatchlistCard } from "./WatchlistCard";
 import { WatchlistRow } from "./WatchlistRow";
 import type { WatchlistRowProps } from "./WatchlistRow";
+import { DEFAULT_PAGE_SIZE, clampPage, getPageCount, paginate } from "@/lib/pagination";
 
 export type WatchlistPanelProps = {
   items: WatchlistRowProps[];
 };
 
 export function WatchlistPanel({ items }: WatchlistPanelProps) {
+  const [page, setPage] = useState(1);
+  const pageCount = getPageCount(items.length, DEFAULT_PAGE_SIZE);
+  const pageItems = paginate(items, page, DEFAULT_PAGE_SIZE);
+
   return (
     <section className="border-default bg-panel rounded-lg border">
       <header className="border-default flex items-center justify-between border-b px-4 py-2.5">
@@ -52,17 +61,22 @@ export function WatchlistPanel({ items }: WatchlistPanelProps) {
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => (
+            {pageItems.map((item) => (
               <WatchlistRow key={item.symbol} {...item} />
             ))}
           </tbody>
         </table>
 
         <div className="flex flex-col gap-2 lg:hidden">
-          {items.map((item) => (
+          {pageItems.map((item) => (
             <WatchlistCard key={item.symbol} {...item} />
           ))}
         </div>
+        <Pagination
+          page={clampPage(page, pageCount)}
+          pageCount={pageCount}
+          onPageChange={setPage}
+        />
       </div>
     </section>
   );
